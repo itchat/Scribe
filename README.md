@@ -26,6 +26,12 @@ video.mp4  →  audio.wav  →  transcript  →  translated SRT  →  subtitled 
                             on ANE)         Google)
 ```
 
+<p align="center">
+  <img src=".github/assets/hero.png" alt="Scribe main window" width="720">
+  <br>
+  <sub><em>Drop videos, pick an engine, hit Start. Settings live in the native Inspector.</em></sub>
+</p>
+
 ## Why I built it
 
 I had a Python prototype using PyQt6 + MLX that shipped as a **~200 MB** PyInstaller bundle with a 3-second cold start and a UI that felt Linux-y on macOS. I wanted to see how far a modern Swift rewrite could go if it followed SOLID strictly and shipped a native UI.
@@ -39,27 +45,17 @@ I had a Python prototype using PyQt6 + MLX that shipped as a **~200 MB** PyInsta
 | Source LOC | ~7,400 | ~2,900 | **−60%** |
 | App binary | ~200 MB | **8.3 MB** | **−95%** |
 | Cold launch | 2–5 s | **< 0.5 s** | |
-| ASR backend | MLX (GPU) | CoreML on Neural Engine | **~2× faster** |
-| Tests | 0 | **115** across 19 suites | |
+| ASR runtime | MLX (GPU) | CoreML on Neural Engine |  |
+| Tests | 0 | **115** across 19 suites |  |
 | External dependencies | 6 | **1** (FluidAudio) | |
 
 ## Pair-programmed with Claude Code
 
-Scribe was built end-to-end with **[Claude Code](https://claude.com/claude-code)** (Opus 4.7 · 1M context) as an experiment in AI pair programming. I drove the design decisions and reviewed every change; Claude wrote most of the code, suggested the refactors, and caught its own SOLID violations.
+Scribe was built end-to-end with **[Claude Code](https://claude.com/claude-code)** (Opus 4.7 · 1M context) as an experiment in AI pair programming. I drove the product decisions and reviewed every change; Claude wrote most of the code, suggested refactors, and caught its own SOLID violations when I asked for an audit.
 
-The project was scoped in 9 phases, each following **Red → Green → Refactor TDD**:
+The build followed strict **Red → Green → Refactor TDD**: 115 tests across 19 suites were written before the implementation they test. When the audit flagged `ProcessingViewModel` for juggling five responsibilities and a Dependency Inversion violation, the refactor split it into four focused services without breaking a single test.
 
-1. Domain types + Protocols (115 tests later live here)
-2. Core logic (SRT parse/write, batch split, retry, response recovery)
-3. FFmpeg infrastructure (locator, command builder, process runner, extractor, probe, composer)
-4. Translation (OpenAI, Google, decorator-pattern fallback)
-5. Config + ASR integration (FluidAudio Parakeet)
-6. Pipeline orchestration + queue
-7. SwiftUI (toolbar, inspector, drag-and-drop, toasts, commands)
-8. FluidAudio ASR wiring
-9. Rebrand + distribution (.app + DMG + GitHub Actions)
-
-The architecture is strict:
+## Architecture
 
 ```
 UI (SwiftUI)
@@ -74,29 +70,29 @@ Protocols ◄── Infrastructure (FFmpeg, FluidAudio, OpenAI, Google)
 Domain (pure value types · zero imports)
 ```
 
-5 SPM targets, unidirectional dependencies, zero singletons. The composition root assembles concrete types **exactly once** per pipeline run.
+Five SPM targets with strictly unidirectional dependencies. Zero singletons. The composition root assembles concrete types **exactly once** per pipeline run, so every component is replaceable and every layer is independently testable.
 
 ## Features
 
-### 🗣️ Speech recognition (local)
+### Speech recognition (local)
 - **Parakeet TDT 0.6B v2**, English-only, via [FluidAudio](https://github.com/FluidInference/FluidAudio)
 - CoreML on the **Apple Neural Engine**
 - ~120× realtime on an M4 Pro
 - Model auto-downloads on first use (~1.2 GB, cached afterwards)
 
-### 🌐 Translation
+### Translation
 - **OpenAI**-compatible APIs (OpenAI, OpenRouter, Azure, local proxies — anything that speaks `/v1/chat/completions`)
 - **Google Translate** free endpoint (no API key)
 - **Decorator-pattern fallback**: if OpenAI fails, try Google; if both fail, keep originals
 - Smart batch splitting with a multi-strategy separator-recovery heuristic for malformed responses
 
-### 🎞️ Video
+### Video
 - Audio extraction with optional **VideoToolbox** hardware acceleration
 - Subtitle burn-in via FFmpeg's `subtitles` filter + `libass`
 - Bilingual SRT side-car (`_en.srt`, `_bi.srt`)
 - `ffmpeg-full` bundled in the release DMG so users never have to install it
 
-### 🖥️ Native macOS UI
+### Native macOS UI
 - SwiftUI `.toolbar`, `.inspector`, `.dropDestination`, `.regularMaterial`
 - Drag `.mp4` in, drag the finished `.mp4` back out to Finder
 - Video thumbnails, duration, resolution, file size (via `AVAssetImageGenerator`)
@@ -104,7 +100,7 @@ Domain (pure value types · zero imports)
 - System notifications on completion, transient toasts for in-session feedback
 - Custom app icon, true fullscreen, keyboard-first
 
-### ⌨️ Keyboard shortcuts
+### Keyboard shortcuts
 | | |
 |---|---|
 | `⌘O` | Open videos |
