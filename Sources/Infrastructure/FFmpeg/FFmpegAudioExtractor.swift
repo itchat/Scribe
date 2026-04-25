@@ -35,6 +35,15 @@ public final class FFmpegAudioExtractor: AudioExtracting, @unchecked Sendable {
             throw ScribeError.audioFileNotFound(videoURL)
         }
 
+        // Reject silent videos up front. The extractor uses `-map a`, which
+        // hard-fails when no audio stream exists ("Stream map 'a' matches no
+        // streams"). Probing first lets us surface a clear noAudioStream
+        // error instead of a wall of ffmpeg stderr.
+        guard try await probe.hasAudioStream(in: videoURL) else {
+            logger.error("No audio stream in \(videoURL.lastPathComponent, privacy: .public)")
+            throw ScribeError.noAudioStream(videoURL)
+        }
+
         print("[FFmpeg] Extracting audio: \(videoURL.lastPathComponent) → \(outputURL.lastPathComponent)")
 
         let cmd = FFmpegCommandBuilder.audioExtractionCommand(

@@ -56,21 +56,12 @@ public enum FFmpegLocator {
     // MARK: - Private
 
     private static func findBundled() -> String? {
-        // Check inside the app bundle's Frameworks directory
-        let bundlePath = Bundle.main.bundlePath
-        let frameworksPath = (bundlePath as NSString).appendingPathComponent("Contents/Frameworks/ffmpeg")
-        if exists(at: frameworksPath) {
-            return frameworksPath
-        }
-
-        // Check same directory as executable
-        if let execURL = Bundle.main.executableURL {
-            let sameDirPath = execURL.deletingLastPathComponent().appendingPathComponent("ffmpeg").path
-            if exists(at: sameDirPath) {
-                return sameDirPath
-            }
-        }
-
-        return nil
+        // ffmpeg lives next to the main binary in Contents/MacOS/ — the
+        // standard slot for helper executables in a macOS .app bundle.
+        // For `swift run` dev mode there is no bundled copy, so this
+        // returns nil and `find()` falls through to system paths.
+        guard let execURL = Bundle.main.executableURL else { return nil }
+        let path = execURL.deletingLastPathComponent().appendingPathComponent("ffmpeg").path
+        return exists(at: path) ? path : nil
     }
 }

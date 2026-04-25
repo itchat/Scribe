@@ -34,8 +34,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
-      - name: Install ffmpeg-full (has libass for subtitle burning)
-        run: brew install ffmpeg-full
+      - name: Install ffmpeg-full + dylibbundler
+        run: brew install ffmpeg-full dylibbundler
 
       - name: Run tests
         run: swift test --parallel

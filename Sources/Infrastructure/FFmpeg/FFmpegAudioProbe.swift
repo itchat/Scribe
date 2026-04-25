@@ -21,10 +21,21 @@ public final class FFmpegAudioProbe: AudioProbing, @unchecked Sendable {
     // MARK: - AudioProbing
 
     public func hasAudioStream(in videoURL: URL) async throws -> Bool {
-        let cmd = [ffmpegPath, "-i", videoURL.path, "-hide_banner", "-f", "null", "-"]
+        // Use ffprobe to query stream metadata directly — much more robust
+        // than grepping ffmpeg's stderr, which contains noise like
+        // `audio:0KiB` in its summary line for video-only files.
+        let ffprobePath = ffmpegPath.replacingOccurrences(of: "ffmpeg", with: "ffprobe")
+        let cmd = [
+            ffprobePath,
+            "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            videoURL.path,
+        ]
         do {
             let output = try await FFmpegProcessRunner.runCapturing(cmd, timeout: Constants.audioCheckTimeout)
-            return output.lowercased().contains("audio:")
+            return output.trimmingCharacters(in: .whitespacesAndNewlines) == "audio"
         } catch {
             logger.warning("Audio check failed, assuming audio exists")
             return true
