@@ -6,28 +6,34 @@ import Infrastructure
 @Observable
 @MainActor
 final class SettingsViewModel {
-    var translationEngine: TranslationEngine
+    var translationMode: TranslationMode
     var baseURL: String
     var apiKey: String
     var model: String
     var customPrompt: String
     var maxCharsPerBatch: Int
     var maxEntriesPerBatch: Int
-    var skipTranslation: Bool
     var skipSubtitleBurning: Bool
     var enableGoogleFallback: Bool
+    /// Captured so saving Settings doesn't reset Live Captions / offline ASR
+    /// engine choices that the user picked from their respective UIs.
+    var liveCaptionEngine: LiveCaptionEngine
+    var offlineASREngine: OfflineASREngine
+    var subtitleStyle: SubtitleStyle
 
     init(config: AppConfig) {
-        self.translationEngine = config.translationEngine
+        self.translationMode = config.translationMode
         self.baseURL = config.baseURL
         self.apiKey = config.apiKey
         self.model = config.model
         self.customPrompt = config.customPrompt
         self.maxCharsPerBatch = config.maxCharsPerBatch
         self.maxEntriesPerBatch = config.maxEntriesPerBatch
-        self.skipTranslation = config.skipTranslation
         self.skipSubtitleBurning = config.skipSubtitleBurning
         self.enableGoogleFallback = config.enableGoogleFallback
+        self.liveCaptionEngine = config.liveCaptionEngine
+        self.offlineASREngine = config.offlineASREngine
+        self.subtitleStyle = config.subtitleStyle
     }
 
     func toConfig() -> AppConfig {
@@ -39,9 +45,11 @@ final class SettingsViewModel {
             maxCharsPerBatch: maxCharsPerBatch,
             maxEntriesPerBatch: maxEntriesPerBatch,
             enableGoogleFallback: enableGoogleFallback,
-            skipTranslation: skipTranslation,
             skipSubtitleBurning: skipSubtitleBurning,
-            translationEngine: translationEngine
+            translationMode: translationMode,
+            subtitleStyle: subtitleStyle,
+            liveCaptionEngine: liveCaptionEngine,
+            offlineASREngine: offlineASREngine
         )
     }
 }

@@ -53,9 +53,11 @@ final class FakeTranslator: SubtitleTranslating, @unchecked Sendable {
 
 final class FakeVideoComposer: VideoComposing, @unchecked Sendable {
     var composeCallCount = 0
+    var lastStyle: SubtitleStyle?
 
-    func compose(video: URL, subtitles: URL, output: URL, progress: (any Protocols.ProgressReporting)?) async throws {
+    func compose(video: URL, subtitles: URL, output: URL, style: SubtitleStyle, progress: (any Protocols.ProgressReporting)?) async throws {
         composeCallCount += 1
+        lastStyle = style
         // Create a fake output file
         try Data(repeating: 0, count: 100).write(to: output)
         progress?.reportProgress(100)
@@ -121,8 +123,12 @@ struct VideoPipelineTests {
         #expect(composer.composeCallCount == 1)
     }
 
-    @Test("Pipeline skips translation when option is set")
-    func skipsTranslation() async throws {
+    @Test("Skip translation alone still burns the original transcript SRT")
+    func skipsTranslationButStillBurns() async throws {
+        // Regression: previously skipTranslation=true short-circuited and
+        // never reached the burn step, even when skipSubtitleBurning=false.
+        // The contract is now: skipTranslation skips ONLY translation;
+        // burning is gated solely by skipSubtitleBurning.
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let videoURL = try makeFakeVideo(in: dir)
@@ -133,7 +139,37 @@ struct VideoPipelineTests {
         let pipeline = VideoPipeline(
             videoURL: videoURL,
             cacheDir: dir,
-            options: ProcessingOptions(skipTranslation: true),
+            options: ProcessingOptions(skipTranslation: true, skipSubtitleBurning: false),
+            audioExtractor: FakeAudioExtractor(),
+            speechRecognizer: FakeSpeechRecognizer(),
+            translator: translator,
+            videoComposer: composer,
+            subtitleFormatter: SubtitleFormatter(),
+            progress: nil
+        )
+
+        let result = await pipeline.process()
+
+        #expect(result.isSuccess)
+        #expect(translator.translateCallCount == 0, "translator must not run when skipTranslation=true")
+        #expect(composer.composeCallCount == 1, "composer MUST burn the original-language SRT when skipSubtitleBurning=false")
+        #expect(result.outputVideoURL != nil)
+        #expect(result.subtitleURL != nil)
+    }
+
+    @Test("Skip both translation and burning produces only the SRT")
+    func skipsBothTranslationAndBurning() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let videoURL = try makeFakeVideo(in: dir)
+
+        let translator = FakeTranslator()
+        let composer = FakeVideoComposer()
+
+        let pipeline = VideoPipeline(
+            videoURL: videoURL,
+            cacheDir: dir,
+            options: ProcessingOptions(skipTranslation: true, skipSubtitleBurning: true),
             audioExtractor: FakeAudioExtractor(),
             speechRecognizer: FakeSpeechRecognizer(),
             translator: translator,
@@ -147,24 +183,26 @@ struct VideoPipelineTests {
         #expect(result.isSuccess)
         #expect(translator.translateCallCount == 0)
         #expect(composer.composeCallCount == 0)
+        #expect(result.outputVideoURL == nil)
         #expect(result.subtitleURL != nil)
     }
 
-    @Test("Pipeline skips burning when option is set")
-    func skipsBurning() async throws {
+    @Test("Skip burning with translation still produces a translated bilingual SRT")
+    func skipsBurningButTranslates() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let videoURL = try makeFakeVideo(in: dir)
 
+        let translator = FakeTranslator()
         let composer = FakeVideoComposer()
 
         let pipeline = VideoPipeline(
             videoURL: videoURL,
             cacheDir: dir,
-            options: ProcessingOptions(skipSubtitleBurning: true),
+            options: ProcessingOptions(skipTranslation: false, skipSubtitleBurning: true),
             audioExtractor: FakeAudioExtractor(),
             speechRecognizer: FakeSpeechRecognizer(),
-            translator: FakeTranslator(),
+            translator: translator,
             videoComposer: composer,
             subtitleFormatter: SubtitleFormatter(),
             progress: nil
@@ -173,7 +211,9 @@ struct VideoPipelineTests {
         let result = await pipeline.process()
 
         #expect(result.isSuccess)
+        #expect(translator.translateCallCount == 1)
         #expect(composer.composeCallCount == 0)
+        #expect(result.outputVideoURL == nil)
         #expect(result.subtitleURL != nil)
     }
 

@@ -26,6 +26,7 @@ public final class FFmpegVideoComposer: VideoComposing, @unchecked Sendable {
         video: URL,
         subtitles: URL,
         output: URL,
+        style: SubtitleStyle,
         progress: (any Protocols.ProgressReporting)?
     ) async throws {
         guard FileManager.default.fileExists(atPath: video.path) else {
@@ -36,12 +37,23 @@ public final class FFmpegVideoComposer: VideoComposing, @unchecked Sendable {
             throw ScribeError.subtitleFileInvalid(subtitles)
         }
 
+        // Probe the actual video dimensions purely so we can pass
+        // `original_size=WxH` to ffmpeg's subtitles filter. libass
+        // otherwise scales `FontSize=N` against an implicit PlayResY=288
+        // and renders 14pt as ≈90px on a 1920-tall canvas. Falls back to
+        // 1280×720 if probing fails.
+        let (videoWidth, videoHeight) = getVideoDimensions(video) ?? (1280, 720)
+        logger.info("Burning at \(videoWidth, privacy: .public)x\(videoHeight, privacy: .public) with fontSize=\(style.fontSize, privacy: .public), marginV=\(style.marginVertical, privacy: .public), marginL/R=\(style.marginHorizontal, privacy: .public)")
+
         let cmd = FFmpegCommandBuilder.videoCompositionCommand(
             ffmpegPath: ffmpegPath,
             inputPath: video.path,
             subtitlePath: subtitles.path,
             outputPath: output.path,
-            useHardwareAccel: useHardwareAccel
+            useHardwareAccel: useHardwareAccel,
+            style: style,
+            videoWidth: videoWidth,
+            videoHeight: videoHeight
         )
 
         let totalDuration = getVideoDuration(video)
@@ -105,6 +117,45 @@ public final class FFmpegVideoComposer: VideoComposing, @unchecked Sendable {
 
         process.waitUntilExit()
         return (process.terminationStatus, stderrOutput)
+    }
+
+    /// Returns the video stream's pixel `(width, height)`, or nil if
+    /// probing fails. Used by the subtitle-style resolver to pick a font
+    /// size off the shorter dimension — `min(width, height) / 24` — so
+    /// portrait clips don't get oversized cues.
+    private func getVideoDimensions(_ videoURL: URL) -> (width: Int, height: Int)? {
+        let ffprobePath = ffmpegPath.replacingOccurrences(of: "ffmpeg", with: "ffprobe")
+        guard FFmpegLocator.exists(at: ffprobePath) else { return nil }
+
+        let process = Process()
+        process.executableURL = URL(filePath: ffprobePath)
+        process.arguments = [
+            "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            videoURL.path,
+        ]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            // ffprobe emits e.g. "1920,1080" (CSV with no header).
+            let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let parts = str.split(separator: ",")
+            guard parts.count == 2,
+                  let w = Int(parts[0]),
+                  let h = Int(parts[1])
+            else { return nil }
+            return (w, h)
+        } catch {
+            return nil
+        }
     }
 
     private func getVideoDuration(_ videoURL: URL) -> TimeInterval? {

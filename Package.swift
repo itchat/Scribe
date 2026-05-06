@@ -5,7 +5,11 @@ import PackageDescription
 let package = Package(
     name: "Scribe",
     platforms: [
-        .macOS(.v14)
+        // macOS 15 (Sequoia) is required by the speech-swift package, which
+        // uses Apple's MLState API for persistent ANE state across token
+        // steps. Bumping here lets us use Qwen3-ASR (0.6B / 1.7B) for the
+        // burn pipeline without per-callsite @available guards.
+        .macOS(.v15)
     ],
     products: [
         .executable(name: "Scribe", targets: ["App"]),
@@ -13,6 +17,11 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-testing.git", exact: "6.2.4"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.9.0"),
+        // soniqo/speech-swift exposes Qwen3-ASR (0.6B + 1.7B) on Apple Silicon
+        // via MLX-Swift. The package itself targets macOS 15 (uses MLState API),
+        // so all call sites are gated with `@available(macOS 15, *)` and our
+        // app deployment target stays at macOS 14.
+        .package(url: "https://github.com/soniqo/speech-swift.git", exact: "0.0.12"),
     ],
     targets: [
         // ── Domain: Pure value types, zero dependencies ──
@@ -35,12 +44,30 @@ let package = Package(
             path: "Sources/Core"
         ),
 
-        // ── Infrastructure: Concrete implementations, depends on Protocols + Domain + FluidAudio ──
+        // ── sherpa-onnx C API exposed as a Clang module ──
+        // Both .xcframeworks plus the module.modulemap are produced by
+        // scripts/fetch-sherpa-onnx.sh (gitignored under vendor/). ONNX
+        // Runtime is required separately because libsherpa-onnx.a leaves
+        // its OrtGetApiBase symbols as undefined externs.
+        // Run that script after cloning the repo, before swift build.
+        .binaryTarget(
+            name: "CSherpaOnnx",
+            path: "vendor/sherpa-onnx.xcframework"
+        ),
+        .binaryTarget(
+            name: "OnnxRuntime",
+            path: "vendor/onnxruntime.xcframework"
+        ),
+
+        // ── Infrastructure: Concrete implementations ──
         .target(
             name: "Infrastructure",
             dependencies: [
                 "Domain", "Protocols",
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                "CSherpaOnnx",
+                "OnnxRuntime",
+                .product(name: "Qwen3ASR", package: "speech-swift"),
             ],
             path: "Sources/Infrastructure"
         ),
@@ -74,6 +101,9 @@ let package = Package(
             dependencies: [
                 "Infrastructure", "Domain", "Protocols",
                 .product(name: "Testing", package: "swift-testing"),
+                // For WordGroupingChunkerTests — we need AlignedWord (in
+                // AudioCommon, transitively re-exported by Qwen3ASR).
+                .product(name: "Qwen3ASR", package: "speech-swift"),
             ],
             path: "Tests/UnitTests/Infrastructure"
         ),

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct ScribeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup {
@@ -18,6 +19,15 @@ struct ScribeApp: App {
                     openVideosViaPanel()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+            }
+
+            // Live Captions entry point — sits under the Window menu so it's
+            // discoverable next to the standard "Bring All to Front" item.
+            CommandGroup(after: .windowList) {
+                Button("Live Captions") {
+                    openWindow(id: "live-captions")
+                }
+                .keyboardShortcut("L", modifiers: [.command, .shift])
             }
 
             // Add "Reset Settings to Defaults" under the app menu (after "About")
@@ -40,6 +50,13 @@ struct ScribeApp: App {
             // Remove the Help menu — we don't have docs to show.
             CommandGroup(replacing: .help) { }
         }
+
+        // Separate scene for live captions; opens via menu / ⌘⇧L.
+        WindowGroup("Live Captions", id: "live-captions") {
+            LiveCaptionsView()
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 720, height: 480)
     }
 
     /// Confirm before posting reset notification, since it's destructive.

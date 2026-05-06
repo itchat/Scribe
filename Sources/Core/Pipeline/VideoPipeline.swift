@@ -70,51 +70,52 @@ public final class VideoPipeline: @unchecked Sendable {
             // Format transcription into subtitle entries
             let entries = subtitleFormatter.format(result: transcription)
 
-            // Write English SRT
+            // Write original-language SRT
             let srtContent = SRTWriter.write(entries)
             try srtContent.write(to: srtURL, atomically: true, encoding: String.Encoding.utf8)
 
-            // If skip translation, stop here
+            // 3. Translate subtitles (70–80%) — optional. The two skip flags
+            // are independent: skipTranslation only suppresses translation;
+            // burning is gated solely by skipSubtitleBurning so the user
+            // still gets a video with the original-language SRT burned in.
+            let subtitlesToBurn: URL
+            let finalSubtitleURL: URL
             if options.skipTranslation {
-                progress?.reportStatus("Recognition completed — translation skipped")
-                progress?.reportProgress(Constants.progressVideoSynthesisEnd)
-                return ProcessingResult(
-                    status: .completed,
-                    subtitleURL: srtURL,
-                    originalSubtitleURL: srtURL
-                )
+                progress?.reportStatus("Translation skipped")
+                progress?.reportProgress(Constants.progressTranslationEnd)
+                subtitlesToBurn = srtURL
+                finalSubtitleURL = srtURL
+            } else {
+                progress?.reportStatus("Translating subtitles...")
+                progress?.reportProgress(Constants.progressTranslationStart)
+                let translatedEntries = try await translator.translate(entries: entries)
+                progress?.reportProgress(Constants.progressTranslationEnd)
+
+                let bilingualURL = videoDir.appendingPathComponent("\(baseName)\(Constants.bilingualSubtitleSuffix)")
+                let bilingualContent = SRTWriter.write(translatedEntries, bilingual: true)
+
+                guard !bilingualContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty else {
+                    progress?.reportStatus("Empty subtitles, skipping synthesis")
+                    progress?.reportProgress(Constants.progressVideoSynthesisEnd)
+                    return ProcessingResult(status: .skipped(reason: "Empty subtitles"))
+                }
+
+                try bilingualContent.write(to: bilingualURL, atomically: true, encoding: String.Encoding.utf8)
+                subtitlesToBurn = bilingualURL
+                finalSubtitleURL = bilingualURL
             }
 
-            // 3. Translate subtitles (70–80%)
-            progress?.reportStatus("Translating subtitles...")
-            progress?.reportProgress(Constants.progressTranslationStart)
-            let translatedEntries = try await translator.translate(entries: entries)
-            progress?.reportProgress(Constants.progressTranslationEnd)
-
-            // Write bilingual SRT
-            let bilingualURL = videoDir.appendingPathComponent("\(baseName)\(Constants.bilingualSubtitleSuffix)")
-            let bilingualContent = SRTWriter.write(translatedEntries, bilingual: true)
-
-            guard !bilingualContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty else {
-                progress?.reportStatus("Empty subtitles, skipping synthesis")
-                progress?.reportProgress(Constants.progressVideoSynthesisEnd)
-                return ProcessingResult(status: .skipped(reason: "Empty subtitles"))
-            }
-
-            try bilingualContent.write(to: bilingualURL, atomically: true, encoding: String.Encoding.utf8)
-
-            // If skip burning, stop here
+            // 4. Burn subtitles into video (80–100%) — optional.
             if options.skipSubtitleBurning {
                 progress?.reportStatus("Processing completed! (subtitle burning skipped)")
                 progress?.reportProgress(Constants.progressVideoSynthesisEnd)
                 return ProcessingResult(
                     status: .completed,
-                    subtitleURL: bilingualURL,
+                    subtitleURL: finalSubtitleURL,
                     originalSubtitleURL: srtURL
                 )
             }
 
-            // 4. Burn subtitles into video (80–100%)
             progress?.reportStatus("Synthesizing video...")
             let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
             let ext = videoURL.pathExtension
@@ -122,8 +123,9 @@ public final class VideoPipeline: @unchecked Sendable {
 
             try await videoComposer.compose(
                 video: videoURL,
-                subtitles: bilingualURL,
+                subtitles: subtitlesToBurn,
                 output: outputURL,
+                style: options.subtitleStyle,
                 progress: progress
             )
 
@@ -133,7 +135,7 @@ public final class VideoPipeline: @unchecked Sendable {
             return ProcessingResult(
                 status: .completed,
                 outputVideoURL: outputURL,
-                subtitleURL: bilingualURL,
+                subtitleURL: finalSubtitleURL,
                 originalSubtitleURL: srtURL
             )
 

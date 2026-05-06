@@ -118,16 +118,10 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
             return TranscriptionResult(text: result.text, segments: segments)
         }
 
-        // Fallback: split result.text by sentence punctuation, single timing
-        let sentences = splitIntoSentences(result.text)
-        let durationPerSentence = result.duration / max(1, Double(sentences.count))
-        let segments = sentences.enumerated().map { i, text in
-            TranscriptionSegment(
-                text: text,
-                start: Double(i) * durationPerSentence,
-                end: Double(i + 1) * durationPerSentence
-            )
-        }
+        // No token timings — fall back to char-weighted chunking so a single
+        // long sentence doesn't paint a wall of text on screen. See
+        // `SentenceChunker` for the chunking + weighting policy.
+        let segments = SentenceChunker.makeSegments(text: result.text, duration: result.duration)
         return TranscriptionResult(text: result.text, segments: segments)
     }
 
@@ -183,19 +177,4 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
         return segments
     }
 
-    /// Simple sentence splitter for fallback (no token timings).
-    private func splitIntoSentences(_ text: String) -> [String] {
-        let pattern = #"[^.!?]+[.!?]+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return [text]
-        }
-        let range = NSRange(text.startIndex..., in: text)
-        let matches = regex.matches(in: text, range: range)
-        var sentences = matches.compactMap { match -> String? in
-            guard let r = Range(match.range, in: text) else { return nil }
-            return String(text[r]).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if sentences.isEmpty { sentences = [text] }
-        return sentences
-    }
 }

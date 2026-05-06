@@ -1,9 +1,12 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import Domain
 
 /// Main application window with native toolbar and materials.
 struct ContentView: View {
     @State private var viewModel = ProcessingViewModel()
+    @State private var selectedItemID: VideoItem.ID?
+    @State private var isWindowDropTargeted = false
 
     var body: some View {
         Group {
@@ -16,6 +19,19 @@ struct ContentView: View {
         .frame(minWidth: 640, minHeight: 440)
         .navigationTitle("Scribe")
         .toolbar { toolbarContent }
+        // The whole window is one big drop target — the user can drop
+        // additional videos anywhere over the empty placeholder OR over
+        // the queued list itself, with a single visual highlight at the
+        // window edge instead of a dedicated drop bar.
+        .overlay(alignment: .top) { dropHighlight }
+        .dropDestination(for: URL.self) { urls, _ in
+            let videoURLs = ContentView.filterVideoURLs(urls)
+            guard !videoURLs.isEmpty else { return false }
+            viewModel.addVideos(urls: videoURLs)
+            return true
+        } isTargeted: { targeted in
+            isWindowDropTargeted = targeted
+        }
         .inspector(isPresented: $viewModel.showSettings) {
             SettingsInspector(
                 config: viewModel.currentConfig,
@@ -43,6 +59,14 @@ struct ContentView: View {
         .toasts($viewModel.toasts)
     }
 
+    /// Filename extensions accepted by the drop target. Keep in sync with
+    /// `ProcessingViewModel.addVideos` validation.
+    private static let videoExtensions: Set<String> = ["mp4", "avi", "mov", "mkv", "flv", "wmv"]
+
+    private static func filterVideoURLs(_ urls: [URL]) -> [URL] {
+        urls.filter { videoExtensions.contains($0.pathExtension.lowercased()) }
+    }
+
     // MARK: - States
 
     private var emptyState: some View {
@@ -51,30 +75,37 @@ struct ContentView: View {
         }
     }
 
+    /// List with single-select; the selected item's ID drives the toolbar
+    /// "Remove Selected" button and the ⌫/Delete keyboard shortcut.
     private var videoList: some View {
-        VStack(spacing: 0) {
-            DropAreaView(compact: true) { urls in
-                viewModel.addVideos(urls: urls)
-            }
-            .frame(height: 48)
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-
-            List {
-                ForEach(viewModel.videoItems) { item in
-                    VideoItemView(item: item)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                        .contextMenu {
-                            Button("Remove from Queue") {
-                                viewModel.removeVideo(item)
-                            }
+        List(selection: $selectedItemID) {
+            ForEach(viewModel.videoItems) { item in
+                VideoItemView(item: item)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .tag(item.id)
+                    .contextMenu {
+                        Button("Remove from Queue") {
+                            viewModel.removeVideo(item)
+                            if selectedItemID == item.id { selectedItemID = nil }
                         }
-                }
+                    }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+    }
+
+    /// Faint blue stroke around the window when a drop is in flight.
+    /// Communicates "you can drop here" without taking up a dedicated row.
+    @ViewBuilder
+    private var dropHighlight: some View {
+        if isWindowDropTargeted {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.accentColor, lineWidth: 3)
+                .padding(4)
+                .allowsHitTesting(false)
+                .transition(.opacity)
         }
     }
 
@@ -92,13 +123,27 @@ struct ContentView: View {
             .help(viewModel.isModelReady ? "ASR model ready" : "ASR model not downloaded")
         }
 
+        // Remove selected — replaces "Clear Completed" since it covers a
+        // strictly larger workflow (drag any item out at any state, hit ⌫).
+        ToolbarItem(placement: .secondaryAction) {
+            Button(role: .destructive) {
+                removeSelected()
+            } label: {
+                Label("Remove Selected", systemImage: "trash")
+            }
+            .disabled(selectedItemID == nil)
+            .keyboardShortcut(.delete, modifiers: [])
+            .help("Remove the selected item from the queue (⌫)")
+        }
+
         ToolbarItem(placement: .secondaryAction) {
             Button {
                 viewModel.clearCompleted()
             } label: {
-                Label("Clear Completed", systemImage: "trash")
+                Label("Clear Completed", systemImage: "checkmark.circle")
             }
-            .disabled(viewModel.isProcessing || viewModel.videoItems.allSatisfy { $0.state == .queued })
+            .disabled(viewModel.isProcessing || viewModel.videoItems.allSatisfy { $0.state != .completed && $0.state != .failed })
+            .help("Remove all completed and failed items")
         }
 
         ToolbarItem(placement: .primaryAction) {
@@ -127,5 +172,12 @@ struct ContentView: View {
             .keyboardShortcut("r", modifiers: .command)
             .help("Start processing queued videos (⌘R)")
         }
+    }
+
+    private func removeSelected() {
+        guard let id = selectedItemID,
+              let item = viewModel.videoItems.first(where: { $0.id == id }) else { return }
+        viewModel.removeVideo(item)
+        selectedItemID = nil
     }
 }

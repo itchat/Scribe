@@ -149,6 +149,13 @@ echo "  Copying ffprobe from $FFPROBE_PATH"
 cp "$FFPROBE_PATH" "$APP_BUNDLE/Contents/MacOS/ffprobe"
 chmod +x "$APP_BUNDLE/Contents/MacOS/ffprobe"
 
+# Compile MLX Metal kernels into mlx.metallib next to the binary.
+# mlx-swift's `swift build` cannot drive `xcrun metal`, so without this
+# step the Qwen3 engines crash at runtime with "Failed to load the
+# default metallib". Helper script handles the kernel list + flags.
+echo "  Building mlx.metallib next to Scribe binary"
+"$PROJECT_DIR/scripts/build-mlx-metallib.sh" "$APP_BUNDLE/Contents/MacOS/mlx.metallib"
+
 APP_SIZE=$(du -sh "$APP_BUNDLE" | cut -f1)
 echo "  App bundle: $APP_BUNDLE ($APP_SIZE)"
 
@@ -202,12 +209,30 @@ fi
 APP_SIZE=$(du -sh "$APP_BUNDLE" | cut -f1)
 echo "  App bundle: $APP_BUNDLE ($APP_SIZE)"
 
-# ─── Step 5: Ad-hoc sign (allows running without Developer ID) ───────
+# ─── Step 5: Code sign (stable identity if available, else ad-hoc) ───
 # Must run AFTER dylibbundler, which modifies install_names and would
 # otherwise invalidate the signatures.
+#
+# Prefer a stable self-signed identity ("Scribe Local Signer") if the
+# user has run scripts/setup-signing-cert.sh — that keeps macOS TCC
+# happy across rebuilds (Screen Recording / mic permissions persist).
+# Otherwise fall back to ad-hoc, which works but forces re-granting
+# permissions every time the binary changes.
+SIGN_IDENTITY="Scribe Local Signer"
 echo ""
-echo "[5/6] Ad-hoc signing..."
-codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || echo "  codesign not available, skipping"
+if security find-identity -v -p codesigning 2>/dev/null | grep -F -q "\"$SIGN_IDENTITY\""; then
+    echo "[5/6] Code signing with stable identity: $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" \
+        --identifier com.scribe.app \
+        "$APP_BUNDLE" 2>/dev/null || {
+            echo "  ⚠ stable signing failed — falling back to ad-hoc"
+            codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
+        }
+else
+    echo "[5/6] Ad-hoc signing (no stable identity found — TCC perms will reset every rebuild)"
+    echo "       Tip: run ./scripts/setup-signing-cert.sh once to fix this."
+    codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || echo "  codesign not available, skipping"
+fi
 
 # ─── Step 6: Create DMG (optional) ───────────────────────────────────
 if [ "$MAKE_DMG" = true ]; then

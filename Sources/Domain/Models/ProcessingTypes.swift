@@ -11,15 +11,20 @@ public struct ProcessingOptions: Sendable {
     public let skipTranslation: Bool
     public let skipSubtitleBurning: Bool
     public let translationEngine: TranslationEngine
+    /// Style applied when burning subtitles. Resolved against the actual
+    /// video's pixel height inside the composer.
+    public let subtitleStyle: SubtitleStyle
 
     public init(
         skipTranslation: Bool = false,
         skipSubtitleBurning: Bool = false,
-        translationEngine: TranslationEngine = .openAI
+        translationEngine: TranslationEngine = .openAI,
+        subtitleStyle: SubtitleStyle = SubtitleStyle()
     ) {
         self.skipTranslation = skipTranslation
         self.skipSubtitleBurning = skipSubtitleBurning
         self.translationEngine = translationEngine
+        self.subtitleStyle = subtitleStyle
     }
 }
 

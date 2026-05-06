@@ -26,6 +26,8 @@
     <string>public.app-category.video</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Scribe does not use the microphone directly.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Scribe captures system audio to generate live captions of what you hear.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

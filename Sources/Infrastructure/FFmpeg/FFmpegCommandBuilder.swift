@@ -69,18 +69,34 @@ public enum FFmpegCommandBuilder {
     // MARK: - Video Composition
 
     /// Build the command to burn subtitles into a video.
+    /// `videoWidth`/`videoHeight` are passed to ffmpeg's `subtitles` filter
+    /// as `original_size=WxH` — without this, libass falls back to its
+    /// internal default PlayResY=288 and scales `FontSize=N` against that,
+    /// making FontSize=45 render as ~300px on a 1920-tall canvas
+    /// (≈15% of the height — the wall-of-text bug). Telling libass the
+    /// real canvas size makes FontSize interpreted in actual pixels.
     public static func videoCompositionCommand(
         ffmpegPath: String,
         inputPath: String,
         subtitlePath: String,
         outputPath: String,
-        useHardwareAccel: Bool
+        useHardwareAccel: Bool,
+        style: SubtitleStyle,
+        videoWidth: Int,
+        videoHeight: Int
     ) -> [String] {
         let escapedPath = escapeSubtitlePath(subtitlePath)
+        // libass on macOS uses fontconfig, which by default doesn't index
+        // /System/Library/Fonts — so without an explicit `fontsdir`, a
+        // request for "New York" falls through to a Verdana-like default.
+        // Pointing it at the system font directory makes the FontName=...
+        // in our force_style payload actually take effect.
+        let fontsDir = escapeSubtitlePath("/System/Library/Fonts")
         let subtitleFilter =
-            "subtitles='\(escapedPath)':" +
-            "force_style='FontSize=\(Constants.ffmpegSubtitleFontSize)," +
-            "PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=4'"
+            "subtitles='\(escapedPath)'" +
+            ":fontsdir='\(fontsDir)'" +
+            ":original_size=\(videoWidth)x\(videoHeight)" +
+            ":force_style='\(style.assForceStyle())'"
 
         if useHardwareAccel {
             return [

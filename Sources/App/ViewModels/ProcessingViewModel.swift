@@ -143,12 +143,35 @@ final class ProcessingViewModel {
 
     func addVideos(urls: [URL]) {
         let validExtensions = ["mp4", "avi", "mov", "mkv", "flv", "wmv"]
-        let newItems = urls
-            .filter { validExtensions.contains($0.pathExtension.lowercased()) }
-            .map { VideoItem(url: $0) }
+        // De-dup against the URLs already in the queue AND within the
+        // incoming batch — `standardizedFileURL` collapses things like
+        // trailing slashes, double slashes and `./` so two visually
+        // different URLs pointing at the same file are treated as one.
+        let existing = Set(videoItems.map { $0.url.standardizedFileURL })
+        var seen = existing
+        var freshURLs: [URL] = []
+        var dropped = 0
+        for url in urls where validExtensions.contains(url.pathExtension.lowercased()) {
+            let key = url.standardizedFileURL
+            if seen.contains(key) {
+                dropped += 1
+                continue
+            }
+            seen.insert(key)
+            freshURLs.append(url)
+        }
+
+        let newItems = freshURLs.map { VideoItem(url: $0) }
         videoItems.append(contentsOf: newItems)
+
         if !newItems.isEmpty {
             toastCenter.show("Added \(newItems.count) video\(newItems.count == 1 ? "" : "s")", kind: .info)
+        }
+        if dropped > 0 {
+            toastCenter.show(
+                "Skipped \(dropped) already-queued file\(dropped == 1 ? "" : "s")",
+                kind: .info
+            )
         }
     }
 
@@ -224,15 +247,20 @@ final class ProcessingViewModel {
 
     private func createPipeline(for videoURL: URL, progress: any Protocols.ProgressReporting) -> VideoPipeline {
         let config = configService.config
+        // The pipeline still consumes a bool + engine pair; map the
+        // single `translationMode` switch into both fields here so we
+        // don't leak the new domain shape into Core/Infrastructure.
+        let resolvedEngine = config.translationMode.toEngine() ?? .openAI
         let options = ProcessingOptions(
-            skipTranslation: config.skipTranslation,
+            skipTranslation: config.translationMode == .off,
             skipSubtitleBurning: config.skipSubtitleBurning,
-            translationEngine: config.translationEngine
+            translationEngine: resolvedEngine,
+            subtitleStyle: config.subtitleStyle
         )
 
         // Translator based on engine selection
         let translator: any SubtitleTranslating = {
-            switch config.translationEngine {
+            switch resolvedEngine {
             case .google:
                 return GoogleTranslator()
             case .openAI:
@@ -269,12 +297,31 @@ final class ProcessingViewModel {
         return VideoPipeline(
             videoURL: videoURL, cacheDir: cacheDir, options: options,
             audioExtractor: audioExtractor,
-            speechRecognizer: modelService.speechRecognizer,
+            speechRecognizer: makeRecognizer(for: config.offlineASREngine),
             translator: translator,
             videoComposer: videoComposer,
             subtitleFormatter: SubtitleFormatter(),
             progress: progress
         )
+    }
+
+    /// Selects the offline ASR conformer for the user's chosen engine.
+    /// OCP: future engines slot in as new cases here without disturbing
+    /// the rest of the pipeline. DIP: returns `any SpeechRecognizing`,
+    /// so `VideoPipeline` stays decoupled from concrete implementations.
+    ///
+    /// `ASRModelService` keeps its Parakeet-specific download UI; the
+    /// Qwen3 variants self-download on first transcription and report
+    /// progress through the per-item `ProgressReporter`.
+    private func makeRecognizer(for engine: OfflineASREngine) -> any SpeechRecognizing {
+        switch engine {
+        case .parakeetV2:
+            return modelService.speechRecognizer
+        case .qwen3_0_6B:
+            return Qwen3OfflineRecognizer(size: .b0_6)
+        case .qwen3_1_7B:
+            return Qwen3OfflineRecognizer(size: .b1_7)
+        }
     }
 }
 
@@ -310,7 +357,7 @@ private struct FailingSpeechRecognizer: SpeechRecognizing, Sendable {
 }
 
 private struct FailingVideoComposer: VideoComposing, Sendable {
-    func compose(video: URL, subtitles: URL, output: URL, progress: (any Protocols.ProgressReporting)?) async throws {
+    func compose(video: URL, subtitles: URL, output: URL, style: SubtitleStyle, progress: (any Protocols.ProgressReporting)?) async throws {
         throw ScribeError.ffmpegNotFound
     }
 }

@@ -106,7 +106,10 @@ struct FFmpegCommandBuilderTests {
             inputPath: "/input.mp4",
             subtitlePath: "/subs.srt",
             outputPath: "/output.mp4",
-            useHardwareAccel: true
+            useHardwareAccel: true,
+            style: SubtitleStyle(),
+            videoWidth: 1920,
+            videoHeight: 1080
         )
         #expect(cmd.contains("h264_videotoolbox"))
         #expect(cmd.contains("-hwaccel"))
@@ -119,7 +122,10 @@ struct FFmpegCommandBuilderTests {
             inputPath: "/input.mp4",
             subtitlePath: "/subs.srt",
             outputPath: "/output.mp4",
-            useHardwareAccel: false
+            useHardwareAccel: false,
+            style: SubtitleStyle(),
+            videoWidth: 1920,
+            videoHeight: 1080
         )
         #expect(cmd.contains("libx264"))
         #expect(!cmd.contains("videotoolbox"))
@@ -132,13 +138,27 @@ struct FFmpegCommandBuilderTests {
             inputPath: "/input.mp4",
             subtitlePath: "/subs.srt",
             outputPath: "/output.mp4",
-            useHardwareAccel: false
+            useHardwareAccel: false,
+            style: SubtitleStyle(),
+            videoWidth: 1920,
+            videoHeight: 1080
         )
         // Find the -vf argument
         if let vfIdx = cmd.firstIndex(of: "-vf"), vfIdx < cmd.index(before: cmd.endIndex) {
             let filter = cmd[cmd.index(after: vfIdx)]
             #expect(filter.contains("subtitles="))
             #expect(filter.contains("FontSize="))
+            // libass on macOS won't find /System/Library/Fonts on its own
+            // — we must point fontsdir there or the FontName is ignored.
+            #expect(filter.contains("fontsdir="))
+            #expect(filter.contains("System/Library/Fonts"))
+            // The bundled-serif font name must be threaded through.
+            #expect(filter.contains("FontName=New York"))
+            // Without original_size, libass scales FontSize against an
+            // implicit PlayResY=288 → 45pt FontSize renders 300px tall
+            // on a 1920-tall video. Passing original_size pins PlayRes
+            // to the real canvas so FontSize is in pixels.
+            #expect(filter.contains("original_size=1920x1080"))
         } else {
             Issue.record("Expected -vf flag in command")
         }

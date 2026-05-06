@@ -11,6 +11,10 @@ dist/
 *.dmg
 *.xcodeproj
 
+# Vendored binary dependencies — fetched by scripts/fetch-sherpa-onnx.sh
+# on demand instead of committed to the repo.
+vendor/
+
 # macOS
 .DS_Store
 .AppleDouble
