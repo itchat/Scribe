@@ -31,5 +31,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
+      # vendor/ is gitignored — Package.swift references binary targets at
+      # vendor/sherpa-onnx.xcframework + vendor/onnxruntime.xcframework, so
+      # fetch them before any swift command can resolve the package graph.
+      - name: Cache sherpa-onnx + ONNX Runtime xcframeworks
+        id: cache-vendor
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
+
+      - name: Fetch vendor xcframeworks
+        if: steps.cache-vendor.outputs.cache-hit != 'true'
+        run: ./scripts/fetch-sherpa-onnx.sh
+
       - name: Run tests
         run: swift test

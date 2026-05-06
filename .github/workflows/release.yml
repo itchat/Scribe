@@ -37,6 +37,20 @@ jobs:
       - name: Install ffmpeg-full + dylibbundler
         run: brew install ffmpeg-full dylibbundler
 
+      # vendor/ is gitignored — Package.swift references binary targets at
+      # vendor/sherpa-onnx.xcframework + vendor/onnxruntime.xcframework, so
+      # fetch them before any swift command can resolve the package graph.
+      - name: Cache sherpa-onnx + ONNX Runtime xcframeworks
+        id: cache-vendor
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: ${{ runner.os }}-vendor-${{ hashFiles('scripts/fetch-sherpa-onnx.sh') }}
+
+      - name: Fetch vendor xcframeworks
+        if: steps.cache-vendor.outputs.cache-hit != 'true'
+        run: ./scripts/fetch-sherpa-onnx.sh
+
       - name: Run tests
         run: swift test --parallel
 
@@ -88,7 +102,7 @@ jobs:
             3. On first launch, right-click → **Open** to bypass Gatekeeper (app is ad-hoc signed without Apple Developer ID)
 
             ## Requirements
-            - macOS 14 (Sonoma) or later
-            - Apple Silicon (M1 or later) recommended
+            - macOS 15 (Sequoia) or later
+            - Apple Silicon (M1 or later) required
 
-            **ffmpeg with libass is bundled** — no separate install needed for subtitle burning.
+            **ffmpeg with libass is bundled** — no separate install needed for subtitle burning. The Qwen3 ASR engines and live captions models download on first use (~342 MB to ~1 GB depending on selection).

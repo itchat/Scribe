@@ -15,7 +15,7 @@ BUILD_DIR="$PROJECT_DIR/.build/release"
 APP_NAME="Scribe"
 APP_BUNDLE="$PROJECT_DIR/dist/$APP_NAME.app"
 DMG_PATH="$PROJECT_DIR/dist/$APP_NAME.dmg"
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 MAKE_DMG=false
 CLEAN=false
