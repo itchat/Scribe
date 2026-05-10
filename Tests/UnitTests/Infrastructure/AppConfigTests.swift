@@ -205,7 +205,7 @@ struct AppConfigTests {
         edited.skipSubtitleBurning = true
         edited.translationMode = .google
         edited.enableGoogleFallback = false
-        edited.liveCaptionEngine = .zipformerZhEn
+        edited.liveCaptionEngine = .paraformerTrilingual
         edited.offlineASREngine = .qwen3_1_7B
         edited.subtitleStyle = SubtitleStyle(
             fontName: "Helvetica Neue",
@@ -230,7 +230,7 @@ struct AppConfigTests {
         #expect(reloaded.skipSubtitleBurning == true)
         #expect(reloaded.translationMode == .google)
         #expect(reloaded.enableGoogleFallback == false)
-        #expect(reloaded.liveCaptionEngine == .zipformerZhEn)
+        #expect(reloaded.liveCaptionEngine == .paraformerTrilingual)
         #expect(reloaded.offlineASREngine == .qwen3_1_7B)
         #expect(reloaded.subtitleStyle.fontName == "Helvetica Neue")
         #expect(reloaded.subtitleStyle.fontSize == 24)

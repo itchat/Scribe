@@ -175,7 +175,20 @@ final class ProcessingViewModel {
         }
     }
 
+    /// Removes a video from the queue. **Refuses to remove a `.processing`
+    /// item** — the underlying `VideoPipeline.process()` task is already
+    /// in flight and removing the visible row would leave the user with
+    /// no progress feedback while disk work continues to write SRTs /
+    /// burned video files into the wild. The user must wait for the
+    /// item to finish (or fail) before removing it.
     func removeVideo(_ item: VideoItem) {
+        guard item.state != .processing else {
+            toastCenter.show(
+                "Can't remove \(item.fileName) while it's processing — wait for it to finish.",
+                kind: .info
+            )
+            return
+        }
         videoItems.removeAll { $0.id == item.id }
     }
 

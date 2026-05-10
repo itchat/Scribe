@@ -1,10 +1,38 @@
 import SwiftUI
+@preconcurrency import Translation
 import Domain
+import Infrastructure
 
 /// Live Captions window. Big rolling caption text at the bottom, history above,
 /// engine picker + Start/Stop button in the toolbar.
 struct LiveCaptionsView: View {
     @State private var vm = LiveCaptionsViewModel()
+
+    // ── Selection-popup translation state ──
+    /// The currently selected substring inside the transcript pane.
+    /// Wired through `SelectableTranscriptView` (an `NSTextView` wrapper);
+    /// resets to "" when the user clears the selection.
+    @State private var selectedText: String = ""
+    /// Latest translation result rendered in the popover.
+    @State private var translation: String = ""
+    /// Banner inside the popover — "via Apple Translation" / "via Google".
+    @State private var translationProvider: String = ""
+    /// Drives the `.popover(...)` visibility. Set true when the user
+    /// selects non-empty text; reset to false when selection clears or
+    /// the popover is dismissed.
+    @State private var showTranslation: Bool = false
+    /// Apple Translation framework configuration. Bumping this to a new
+    /// instance re-fires `.translationTask` so each fresh selection
+    /// triggers a translation pass even when the language pair is the
+    /// same as last time.
+    @State private var translationConfig: TranslationSession.Configuration?
+    /// Cache the direction so the Google fallback can look up the same
+    /// `(source → target)` codes the Apple session was set up with.
+    @State private var translationDirection: InstantTranslator.Direction = .enToZh
+    /// Debounce token for selection changes — only the latest fires.
+    @State private var selectionDebounceID = UUID()
+
+    private let googleFallback = InstantTranslator()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +53,46 @@ struct LiveCaptionsView: View {
         .frame(minWidth: 560, minHeight: 360)
         .navigationTitle("Live Captions")
         .toolbar { toolbar }
+        // Apple Translation: re-fires whenever the user makes a fresh
+        // selection (we mutate `translationConfig` to a new instance to
+        // force a re-run). Body kept tight + inline because
+        // `TranslationSession` isn't Sendable and can't be passed to
+        // helper methods. The Google fallback is a separate task.
+        .translationTask(translationConfig) { session in
+            let text = await MainActor.run { selectedText }
+            guard !text.isEmpty else { return }
+            do {
+                let response = try await session.translate(text)
+                await MainActor.run {
+                    guard text == selectedText else { return }
+                    translation = response.targetText
+                    translationProvider = "Apple Translation"
+                }
+            } catch {
+                // Apple failed (e.g. language pack not installed) —
+                // schedule a separate task for Google so we don't
+                // entangle the session's isolation with the Google
+                // actor's.
+                await fallbackToGoogle(text: text)
+            }
+        }
+    }
+
+    /// Google-only fallback when Apple's Translation framework throws
+    /// (no language pack, unsupported pair, etc.). Runs on MainActor
+    /// so it can read/write the SwiftUI view-state directly.
+    @MainActor
+    private func fallbackToGoogle(text: String) async {
+        let direction = translationDirection
+        do {
+            let translated = try await googleFallback.translate(text, direction: direction)
+            guard text == selectedText else { return }
+            translation = translated
+            translationProvider = "Google Translate"
+        } catch {
+            translation = "Translation failed: \(error.localizedDescription)"
+            translationProvider = ""
+        }
     }
 
     // MARK: - Sections
@@ -42,52 +110,124 @@ struct LiveCaptionsView: View {
         }
     }
 
-    /// ID used to scroll the live (in-progress) partial into view as it
-    /// grows. A constant string avoids re-creating identity on each update,
-    /// which would otherwise re-trigger LazyVStack's diffing.
-    private static let livePartialID = "live-partial"
-
+    /// AppKit-backed selectable transcript pane. Confirmed history rows
+    /// + the in-progress live partial are folded into one `NSTextView`
+    /// so a selection can naturally span both. The view drives the
+    /// translation popup via `handleSelectionChange`.
     private var historyScroll: some View {
-        ScrollView {
-            ScrollViewReader { proxy in
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(vm.history) { entry in
-                        Text(entry.text)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .id(entry.id)
-                    }
-                    // Live partial: rendered inline as the trailing entry
-                    // so the user reads the transcript building up in real
-                    // time. Brighter than finalized history to signal
-                    // "still being decoded — may change".
-                    if !vm.currentCaption.isEmpty {
-                        Text(vm.currentCaption)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .id(Self.livePartialID)
-                    }
+        SelectableTranscriptView(
+            history: vm.history,
+            currentCaption: vm.currentCaption,
+            onSelectionChange: handleSelectionChange
+        )
+        .popover(isPresented: $showTranslation, arrowEdge: .trailing) {
+            translationPopover
+        }
+    }
+
+    // MARK: - Selection → translation
+
+    private func handleSelectionChange(_ text: String) {
+        selectedText = text
+        if text.isEmpty {
+            showTranslation = false
+            return
+        }
+        // Debounce — when the user is dragging the mouse to extend a
+        // selection we don't want to fire a translation on every
+        // intermediate character.
+        let token = UUID()
+        selectionDebounceID = token
+        Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard selectionDebounceID == token else { return }
+            guard !selectedText.isEmpty, selectedText == text else { return }
+            beginTranslation(of: text)
+        }
+    }
+
+    private func beginTranslation(of text: String) {
+        let direction = InstantTranslator.detectDirection(text)
+        translation = ""
+        translationProvider = ""
+        showTranslation = true
+
+        // Re-fire `.translationTask`. Two cases:
+        // 1. Direction changed (or first time) — replace the config.
+        //    SwiftUI sees a new value and re-runs.
+        // 2. Same direction as last time — `.translationTask` won't
+        //    re-fire on equal values, so we call
+        //    `configuration.invalidate()` (the official escape hatch
+        //    documented at WWDC 2024) to bump its internal generation.
+        let langs = direction.appleLangs
+        if translationDirection == direction, translationConfig != nil {
+            translationConfig?.invalidate()
+        } else {
+            translationDirection = direction
+            translationConfig = TranslationSession.Configuration(
+                source: Locale.Language(identifier: langs.source),
+                target: Locale.Language(identifier: langs.target)
+            )
+        }
+
+        // Belt-and-suspenders: Apple Translation sometimes silently
+        // hangs (e.g. when the language pack hasn't been downloaded
+        // yet and the system prompt didn't surface). Kick a fallback
+        // timer — if no provider has populated the popover after 4 s
+        // we hand off to Google so the spinner doesn't stick.
+        scheduleAppleTimeout(for: text)
+    }
+
+    /// 4-second watchdog: if `translationProvider` is still empty by
+    /// the time it fires, treat Apple as a no-show and try Google.
+    private func scheduleAppleTimeout(for text: String) {
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            guard text == selectedText, translationProvider.isEmpty else { return }
+            await fallbackToGoogle(text: text)
+        }
+    }
+
+    private var translationPopover: some View {
+        // Auto-expanding popover. Each `Text` gets
+        // `.fixedSize(horizontal: false, vertical: true)` which forces
+        // SwiftUI to give the view its natural wrapped-line height
+        // instead of squishing it — combined with no `maxHeight` on
+        // the popover frame, the bubble grows as tall as needed for
+        // the longest translation. Width is capped so CJK text wraps
+        // at a comfortable measure.
+        VStack(alignment: .leading, spacing: 10) {
+            Text(selectedText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            if translation.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Translating…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
-                .padding(20)
-                .onChange(of: vm.history.count) { _, _ in
-                    if let last = vm.history.last {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-                .onChange(of: vm.currentCaption) { _, newValue in
-                    guard !newValue.isEmpty else { return }
-                    // No animation here — the partial updates many times a
-                    // second and animating each scroll would jitter badly.
-                    proxy.scrollTo(Self.livePartialID, anchor: .bottom)
-                }
+            } else {
+                Text(translation)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !translationProvider.isEmpty {
+                Text(translationProvider)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
+        .padding(14)
+        .frame(minWidth: 280, idealWidth: 360, maxWidth: 460, alignment: .leading)
     }
 
     @ViewBuilder

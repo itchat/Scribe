@@ -10,27 +10,33 @@ public enum LiveCaptionEngine: String, Codable, Sendable, CaseIterable {
     /// latency, English-only.
     case nemotron = "Nemotron 0.6B"
 
-    /// sherpa-onnx streaming bilingual zh-en Zipformer transducer (2023-02-20
-    /// release). Single bilingual decoder with shared BPE+char vocab — handles
-    /// intra-utterance Mandarin↔English code-switching natively (e.g.
-    /// "今天 deploy 一个 new feature 到 production"). True streaming with
-    /// frame-sync online decoding; ~300 ms first-partial latency on
-    /// Apple Silicon. ONNX runtime, fully on-device.
-    /// See https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html
-    case zipformerZhEn = "Zipformer zh-en"
+    /// sherpa-onnx streaming Zipformer zh xlarge int8 (2025-06-30).
+    /// A bigger Mandarin-focused Zipformer transducer than the 2023
+    /// bilingual baseline — int8-quantised to ~570 MB. Better Chinese
+    /// quality at the cost of weaker English; pick this when the
+    /// audio is predominantly Mandarin.
+    case zipformerZhXLarge = "Zipformer zh-XLarge"
+
+    /// sherpa-onnx streaming Paraformer trilingual zh-yue-en. Non-
+    /// autoregressive Paraformer covers Mandarin, Cantonese, and
+    /// English in the same decoder — useful when the speaker mixes
+    /// any two of the three. ~999 MB compressed.
+    case paraformerTrilingual = "Paraformer zh-yue-en"
 
     public var displayName: String {
         switch self {
-        case .nemotron:      return "Nemotron 0.6B (English, fast)"
-        case .zipformerZhEn: return "Zipformer zh-en (Chinese + English, code-switching)"
+        case .nemotron:             return "Nemotron 0.6B (English, fast)"
+        case .zipformerZhXLarge:    return "Zipformer zh-XLarge (Mandarin-focused, larger)"
+        case .paraformerTrilingual: return "Paraformer zh-yue-en (Mandarin + Cantonese + English)"
         }
     }
 
     /// Approximate first-run download size shown in the UI.
     public var downloadSizeLabel: String {
         switch self {
-        case .nemotron:      return "~700 MB"
-        case .zipformerZhEn: return "~342 MB"
+        case .nemotron:             return "~700 MB"
+        case .zipformerZhXLarge:    return "~570 MB"
+        case .paraformerTrilingual: return "~999 MB"
         }
     }
 }

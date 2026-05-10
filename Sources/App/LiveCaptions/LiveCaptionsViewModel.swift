@@ -252,8 +252,9 @@ final class LiveCaptionsViewModel {
     /// just adding a `case` here + a new `StreamingTranscribing` conformer.
     private static func makeRecognizer(for engine: LiveCaptionEngine) -> any StreamingTranscribing {
         switch engine {
-        case .nemotron:      return NemotronStreamingRecognizer()
-        case .zipformerZhEn: return SherpaOnnxStreamingRecognizer()
+        case .nemotron:             return NemotronStreamingRecognizer()
+        case .zipformerZhXLarge:    return SherpaZipformerXLargeStreamingRecognizer()
+        case .paraformerTrilingual: return SherpaParaformerTrilingualStreamingRecognizer()
         }
     }
 

@@ -61,7 +61,7 @@ public actor Qwen3OfflineRecognizer: SpeechRecognizing {
         let asrModel = try await ensureASRModelLoaded(progress: progress)
 
         progress?.reportStatus("Transcribing with Qwen3-ASR \(size.label)…")
-        let (samples, duration) = try Self.readAudio16kMono(at: url)
+        let (samples, duration) = try AudioFileReader.readMono16k(at: url)
 
         // Qwen3ASRModel.transcribe is synchronous and not thread-safe —
         // actor isolation guarantees serialised access, and we keep the
@@ -139,78 +139,19 @@ public actor Qwen3OfflineRecognizer: SpeechRecognizing {
         duration: Double,
         progress: (any Protocols.ProgressReporting)?
     ) async -> [Domain.TranscriptionSegment] {
-        let language = Self.detectLanguage(text)
+        let language = AudioFileReader.detectLanguage(text)
 
         guard let aligner = await ensureAlignerLoaded(progress: progress) else {
-            return Self.makeFallbackSegments(text: text, duration: duration)
+            return SentenceChunker.makeSegments(text: text, duration: duration)
         }
 
         progress?.reportStatus("Aligning word-level timestamps…")
         let words = aligner.align(audio: samples, text: text, sampleRate: 16000, language: language)
         guard !words.isEmpty else {
             logger.warning("Aligner returned no words — falling back to char-weighted chunker")
-            return Self.makeFallbackSegments(text: text, duration: duration)
+            return SentenceChunker.makeSegments(text: text, duration: duration)
         }
         logger.info("Aligner produced \(words.count, privacy: .public) word timestamps")
         return WordGroupingChunker.makeSegments(words: words)
-    }
-
-    /// Crude CJK ratio heuristic. The aligner accepts an open-ended
-    /// `String?` language hint; "Chinese" vs "English" steers its word
-    /// splitter (CJK chars vs whitespace tokenisation). Other languages
-    /// fall back to "English" for now — extend if Spanish/Japanese
-    /// transcripts start showing up in real workloads.
-    private static func detectLanguage(_ text: String) -> String {
-        var cjkCount = 0
-        var totalNonSpace = 0
-        for scalar in text.unicodeScalars {
-            if !scalar.properties.isWhitespace {
-                totalNonSpace += 1
-            }
-            // CJK Unified Ideographs + Extension A
-            if (0x3400...0x4DBF).contains(scalar.value) || (0x4E00...0x9FFF).contains(scalar.value) {
-                cjkCount += 1
-            }
-        }
-        guard totalNonSpace > 0 else { return "English" }
-        return Double(cjkCount) / Double(totalNonSpace) > 0.3 ? "Chinese" : "English"
-    }
-
-    /// Read a 16 kHz mono Float32 sample buffer from disk. The pipeline's
-    /// `FFmpegAudioExtractor` already writes 16k mono WAV (`-ar 16000 -ac 1`),
-    /// so AVAudioFile's processingFormat lands on Float32 and we just copy
-    /// the channel data out.
-    private static func readAudio16kMono(at url: URL) throws -> (samples: [Float], duration: Double) {
-        let file = try AVAudioFile(forReading: url)
-        let frameCount = AVAudioFrameCount(file.length)
-        guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount)
-        else {
-            throw ScribeError.audioFileNotFound(url)
-        }
-        try file.read(into: buffer)
-
-        let duration = Double(file.length) / file.processingFormat.sampleRate
-
-        // FFmpeg outputs mono PCM s16le → AVAudioFile converts to Float32 on
-        // read, so floatChannelData is the canonical path. If a future
-        // extraction format ever returns int data, we'd need a converter
-        // here, but right now the contract is fixed.
-        guard let floatChannels = buffer.floatChannelData else {
-            throw ScribeError.audioExtractionFailed(
-                underlying: NSError(
-                    domain: "Qwen3OfflineRecognizer", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Extracted audio at \(url.lastPathComponent) is not Float32 PCM"]
-                )
-            )
-        }
-        let samples = Array(UnsafeBufferPointer(start: floatChannels[0], count: Int(buffer.frameLength)))
-        return (samples, duration)
-    }
-
-    /// Char-weighted fallback used when the aligner is unavailable or
-    /// returns empty. See `SentenceChunker` for the policy.
-    private static func makeFallbackSegments(text: String, duration: Double) -> [Domain.TranscriptionSegment] {
-        SentenceChunker.makeSegments(text: text, duration: duration)
     }
 }

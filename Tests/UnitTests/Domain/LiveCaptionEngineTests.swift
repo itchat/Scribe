@@ -13,9 +13,11 @@ import Foundation
 @Suite("LiveCaptionEngine")
 struct LiveCaptionEngineTests {
 
-    @Test("Supported engines are exactly Nemotron and Zipformer zh-en")
+    @Test("Supported engines are exactly Nemotron, Zipformer zh-XLarge, Paraformer trilingual")
     func supportedEngines() {
-        #expect(LiveCaptionEngine.allCases == [.nemotron, .zipformerZhEn])
+        #expect(LiveCaptionEngine.allCases == [
+            .nemotron, .zipformerZhXLarge, .paraformerTrilingual,
+        ])
     }
 
     @Test("Every case has a non-empty display name")

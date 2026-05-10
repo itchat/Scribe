@@ -89,6 +89,7 @@ struct ContentView: View {
                             viewModel.removeVideo(item)
                             if selectedItemID == item.id { selectedItemID = nil }
                         }
+                        .disabled(item.state == .processing)
                     }
             }
         }
@@ -125,15 +126,19 @@ struct ContentView: View {
 
         // Remove selected — replaces "Clear Completed" since it covers a
         // strictly larger workflow (drag any item out at any state, hit ⌫).
+        // Disabled while the selection is mid-process so the user can't
+        // accidentally orphan an in-flight pipeline.
         ToolbarItem(placement: .secondaryAction) {
             Button(role: .destructive) {
                 removeSelected()
             } label: {
                 Label("Remove Selected", systemImage: "trash")
             }
-            .disabled(selectedItemID == nil)
+            .disabled(!isSelectionRemovable)
             .keyboardShortcut(.delete, modifiers: [])
-            .help("Remove the selected item from the queue (⌫)")
+            .help(isSelectionRemovable
+                  ? "Remove the selected item from the queue (⌫)"
+                  : "Can't remove an item while it's processing")
         }
 
         ToolbarItem(placement: .secondaryAction) {
@@ -178,6 +183,19 @@ struct ContentView: View {
         guard let id = selectedItemID,
               let item = viewModel.videoItems.first(where: { $0.id == id }) else { return }
         viewModel.removeVideo(item)
-        selectedItemID = nil
+        // The view-model refuses to remove .processing items and surfaces a
+        // toast; only clear the selection when the row really left the list.
+        if !viewModel.videoItems.contains(where: { $0.id == id }) {
+            selectedItemID = nil
+        }
+    }
+
+    /// True when the selected item exists and is in a state that allows
+    /// removal — anything except `.processing`.
+    private var isSelectionRemovable: Bool {
+        guard let id = selectedItemID,
+              let item = viewModel.videoItems.first(where: { $0.id == id })
+        else { return false }
+        return item.state != .processing
     }
 }

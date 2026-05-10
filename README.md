@@ -49,7 +49,7 @@ I had a Python prototype using PyQt6 + MLX that shipped as a **~200 MB** PyInsta
 | App binary (Mach-O) | ~200 MB | **69 MB** |
 | Cold launch | 2–5 s | **< 0.5 s** |
 | ASR runtime | MLX (GPU) | CoreML (ANE) + MLX |
-| Tests | 0 | **173** across 27 suites |
+| Tests | 0 | **168** across 26 suites |
 | Transcript languages | English | English (Parakeet) + 30+ via Qwen3 ASR |
 | External dependencies | 6 | 2 SPM (FluidAudio + speech-swift) + 2 binary (sherpa-onnx + ONNX Runtime, fetched on demand) |
 
@@ -59,7 +59,7 @@ The full `.app` bundle is ~160 MB because it ships ffmpeg-full, dylibbundler-rew
 
 Scribe was built end-to-end with **[Claude Code](https://claude.com/claude-code)** (Opus 4.7 · 1M context) as an experiment in AI pair programming. I drove the product decisions and reviewed every change; Claude wrote most of the code, suggested refactors, and caught its own SOLID violations when I asked for an audit.
 
-The build followed strict **Red → Green → Refactor TDD**: 173 tests across 27 suites were written before the implementation they test. When the audit flagged `ProcessingViewModel` for juggling five responsibilities and a Dependency Inversion violation, the refactor split it into four focused services without breaking a single test.
+The build followed strict **Red → Green → Refactor TDD**: 168 tests across 26 suites were written before the implementation they test. When the audit flagged `ProcessingViewModel` for juggling five responsibilities and a Dependency Inversion violation, the refactor split it into four focused services without breaking a single test.
 
 ## Architecture
 
@@ -92,8 +92,11 @@ Both Qwen3 paths run on [soniqo/speech-swift](https://github.com/soniqo/speech-s
 ### Live Captions (⌘⇧L)
 A separate window that captures system audio via **ScreenCaptureKit** and streams a transcript into a notepad-shaped scroll view in real time.
 
-- **Nemotron 0.6B** — true streaming (1.1 s latency), English-only
-- **Zipformer zh-en** — sherpa-onnx bilingual transducer, ~300 ms latency, native code-switching
+- **Nemotron 0.6B** — true streaming (~1.1 s latency), English-only
+- **Zipformer zh-XLarge** — sherpa-onnx Mandarin-focused transducer (int8, 2025-06-30 release), larger than the original bilingual Zipformer for noticeably better Chinese WER. ~570 MB.
+- **Paraformer zh-yue-en** — sherpa-onnx streaming non-autoregressive Paraformer covering Mandarin + Cantonese + English in a shared decoder. ~999 MB.
+
+**Selection → instant translate popup.** Highlight any line of the live transcript and a popover slides in with the translation: Apple's on-device `Translation` framework first, falling back to Google Translate when the language pack isn't installed (or after a 4-second watchdog if the framework silently hangs). Direction is auto-detected from CJK character ratio — Chinese selection → English popup, English selection → Chinese popup.
 
 Toolbar exports the rolling transcript as SRT, plain text, or copies it to the clipboard. macOS Screen-Recording permission is requested on first start.
 
@@ -184,7 +187,7 @@ A few pieces I'm happy with:
 - **[soniqo/speech-swift](https://github.com/soniqo/speech-swift)** — MLX-Swift port of Qwen3-ASR + Qwen3-ForcedAligner
 - **[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — ONNX Runtime streaming Zipformer for zh-en
 - **[FFmpeg](https://ffmpeg.org/)** (subprocess, bundled) — audio + video
-- **[swift-testing](https://github.com/swiftlang/swift-testing)** — all 173 tests
+- **[swift-testing](https://github.com/swiftlang/swift-testing)** — all 168 tests
 - **ScreenCaptureKit** for live system-audio capture
 - **URLSession** for HTTP; **Codable** + JSON for config persistence (`~/Library/Application Support/Scribe/`)
 
@@ -197,7 +200,7 @@ Scribe/
 │   ├── Domain/                    # value types, zero imports
 │   ├── Protocols/                 # ~10 small interfaces
 │   ├── Core/                      # pipeline, parsers, retry, batch
-│   ├── Infrastructure/            # FFmpeg, ASR (9 files), translation, config
+│   ├── Infrastructure/            # FFmpeg, ASR (~10 engines + helpers), translation, config
 │   └── App/
 │       ├── LiveCaptions/          # standalone ⌘⇧L window
 │       ├── Services/              # ConfigService, ASRModelService, Toast, Notifier
