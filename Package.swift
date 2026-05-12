@@ -68,6 +68,13 @@ let package = Package(
                 "CSherpaOnnx",
                 "OnnxRuntime",
                 .product(name: "Qwen3ASR", package: "speech-swift"),
+                // SpeechVAD ships Silero VAD which we use to segment the
+                // continuous SCStream audio into speech runs for the
+                // Qwen3-ASR Live Captions engine — speech-swift's own
+                // `StreamingASR` class takes a complete buffer upfront and
+                // can't be driven push-style, so we reuse its VAD bricks
+                // and run our own actor-buffered loop.
+                .product(name: "SpeechVAD", package: "speech-swift"),
             ],
             path: "Sources/Infrastructure"
         ),

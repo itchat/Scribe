@@ -255,6 +255,8 @@ final class LiveCaptionsViewModel {
         case .nemotron:             return NemotronStreamingRecognizer()
         case .zipformerZhXLarge:    return SherpaZipformerXLargeStreamingRecognizer()
         case .paraformerTrilingual: return SherpaParaformerTrilingualStreamingRecognizer()
+        case .qwen3ASRSmall:        return Qwen3ASRStreamingRecognizer(size: .b0_6)
+        case .qwen3ASRLarge:        return Qwen3ASRStreamingRecognizer(size: .b1_7)
         }
     }
 
