@@ -2,6 +2,7 @@
 import Foundation
 import os
 @preconcurrency import FluidAudio
+import MLX
 import Domain
 import Protocols
 import Qwen3ASR
@@ -110,6 +111,12 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
 
     private var committed: String = ""
     private var currentLive: String = ""
+    /// Number of finalised utterances since the last MLX cache flush.
+    /// Used to bound GPU residue over long-running sessions without
+    /// thrashing the cache on every emission. Empirically 8 utterances
+    /// leaves room for the encoder/decoder allocation cycle to amortise
+    /// while still releasing memory before it accumulates to GB-scale.
+    private var finalsSinceCacheFlush: Int = 0
 
     private var continuation: AsyncStream<LiveCaptionUpdate>.Continuation?
     private var stream: AsyncStream<LiveCaptionUpdate>?
@@ -144,29 +151,50 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
     }
 
     public func start() async throws {
-        if asrModel != nil, vadModel != nil { return }
-
         let label = size.label
-        logger.info("Loading Qwen3-ASR \(label, privacy: .public) streaming engine")
+        let needsModels = !testingSkipModelLoad && (asrModel == nil || vadModel == nil)
 
-        // Co-load: weights are independent so we let the HF downloader
-        // sequence them. Qwen3-ASR pulls ~342 MB / ~700 MB on first run,
-        // Silero VAD adds ~40 MB; the call is idempotent thanks to the
-        // downloader's skip-if-exists logic.
-        let asr = try await Qwen3ASRModel.fromPretrained(
-            modelId: size.modelId,
-            cacheDir: nil,
-            offlineMode: false,
-            progressHandler: nil
-        )
-        let vad = try await SileroVADModel.fromPretrained()
+        if needsModels {
+            logger.info("Loading Qwen3-ASR \(label, privacy: .public) streaming engine")
 
-        self.asrModel = asr
-        self.vadModel = vad
-        self.vadProcessor = StreamingVADProcessor(model: vad)
+            // Co-load: weights are independent so we let the HF downloader
+            // sequence them. Qwen3-ASR pulls ~342 MB / ~700 MB on first run,
+            // Silero VAD adds ~40 MB; the call is idempotent thanks to the
+            // downloader's skip-if-exists logic.
+            let asr = try await Qwen3ASRModel.fromPretrained(
+                modelId: size.modelId,
+                cacheDir: nil,
+                offlineMode: false,
+                progressHandler: nil
+            )
+            let vad = try await SileroVADModel.fromPretrained()
 
+            self.asrModel = asr
+            self.vadModel = vad
+
+            // Cap the MLX GPU cache so a long Live Captions session can't
+            // balloon to multiple GB — the cache reuses allocations across
+            // transcribe() calls, but without a ceiling it grows monotonically
+            // for the lifetime of the process. 512 MB is generous for two
+            // models that fit in ~700 MB themselves plus the per-call
+            // working set.
+            MLX.Memory.cacheLimit = 512 * 1024 * 1024
+        }
+
+        // Always fresh-arm the per-session pieces — even when models stay
+        // loaded across restart, the VAD's internal chunk counter and the
+        // processing loop must be re-initialised, otherwise a second start()
+        // after a finish() leaves the engine in "loaded but inert" state:
+        // appendAudio appends, no drain pulls, no transcription emits, UI
+        // shows "listening" forever.
+        if let vad = vadModel {
+            vadProcessor = StreamingVADProcessor(model: vad)
+        }
+        resetSessionState()
         startProcessingLoop()
-        logger.info("Qwen3-ASR \(label, privacy: .public) streaming engine ready")
+        if needsModels {
+            logger.info("Qwen3-ASR \(label, privacy: .public) streaming engine ready")
+        }
     }
 
     public nonisolated func appendAudio(_ buffer: AVAudioPCMBuffer) async throws {
@@ -220,12 +248,17 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         processingTask?.cancel()
         processingTask = nil
         resetSessionState()
-        if vadProcessor != nil {
+        if let vadModel {
             // Recreating the processor is cheaper than spelunking
             // its internal four-state machine for a reset entry point.
-            if let vadModel {
-                vadProcessor = StreamingVADProcessor(model: vadModel)
-            }
+            vadProcessor = StreamingVADProcessor(model: vadModel)
+        }
+        // Drop any cached intermediate tensors from the prior session so a
+        // long-running app doesn't accumulate per-session GPU residue.
+        // Guarded on asrModel — without weights loaded MLX hasn't opened
+        // the metallib and clearCache would fault.
+        if asrModel != nil {
+            MLX.Memory.clearCache()
         }
         startProcessingLoop()
     }
@@ -249,6 +282,10 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
     // MARK: - Internal: VAD/ASR loop
 
     private func startProcessingLoop() {
+        // Cancel any orphan task first — start() can be called while a
+        // previous task is still draining (e.g. user-initiated reset()).
+        processingTask?.cancel()
+        processingGeneration += 1
         processingTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.drain()
@@ -342,6 +379,17 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         appendCommitted(text)
         currentLive = ""
         yieldCumulative(isFinal: false)
+
+        // Bounded cache pruning — every N finals we drop the MLX scratch
+        // pool. Without this, long sessions leak GPU memory monotonically
+        // because MLX retains every per-call allocation up to cacheLimit
+        // and reallocates lazily, so apparent residency grows for hours
+        // before steady state.
+        finalsSinceCacheFlush += 1
+        if finalsSinceCacheFlush >= 8 {
+            finalsSinceCacheFlush = 0
+            MLX.Memory.clearCache()
+        }
     }
 
     private func appendCommitted(_ text: String) {
@@ -433,4 +481,42 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
     ) -> AsyncStream<LiveCaptionUpdate>.Continuation? {
         return nil
     }
+
+    // MARK: - Test hooks
+    //
+    // These exist so `Qwen3StreamingLifecycleTests` can exercise the
+    // start/finish/start lifecycle (the actual regression we're guarding
+    // against) without paying the ~500 MB model download tax. They are
+    // not part of any public protocol and should not be used at runtime.
+
+    /// Marks the model fields as if `start()` had loaded them. Sentinel
+    /// values are intentionally `nil` placeholders dressed up — they will
+    /// crash if any real transcription pipeline runs against them — so
+    /// only the lifecycle test should poke them.
+    internal func testingMarkModelsLoaded() {
+        // We can't construct real Qwen3ASRModel/SileroVADModel without
+        // weights, but `start()` only branches on nil-vs-non-nil. We
+        // satisfy that branch by leaving them nil and instead skipping
+        // the model load entirely via the test-only flag below.
+        testingSkipModelLoad = true
+    }
+
+    /// When set, `start()` treats the engine as already loaded and only
+    /// runs the lifecycle side of the function (VAD reset, processing
+    /// loop arming). The test sets this so we can drive the failure
+    /// path without weights.
+    private var testingSkipModelLoad: Bool = false
+
+    internal var testingIsProcessing: Bool {
+        guard let task = processingTask else { return false }
+        return !task.isCancelled
+    }
+
+    /// Monotonic generation counter incremented every time
+    /// `startProcessingLoop()` arms a new task. The test compares this
+    /// across `start()` / `reset()` calls to verify a *new* task was
+    /// installed rather than the old one being reused.
+    private var processingGeneration: Int = 0
+
+    internal var testingProcessingTaskID: Int { processingGeneration }
 }

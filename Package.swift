@@ -63,7 +63,7 @@ let package = Package(
         .target(
             name: "Infrastructure",
             dependencies: [
-                "Domain", "Protocols",
+                "Domain", "Protocols", "Core",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 "CSherpaOnnx",
                 "OnnxRuntime",
@@ -111,6 +111,9 @@ let package = Package(
                 // For WordGroupingChunkerTests — we need AlignedWord (in
                 // AudioCommon, transitively re-exported by Qwen3ASR).
                 .product(name: "Qwen3ASR", package: "speech-swift"),
+                // For Qwen3SegmentPlannerTests — VADEvent / SpeechSegment
+                // live in SpeechVAD and AudioCommon respectively.
+                .product(name: "SpeechVAD", package: "speech-swift"),
             ],
             path: "Tests/UnitTests/Infrastructure"
         ),
