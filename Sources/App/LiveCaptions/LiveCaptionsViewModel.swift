@@ -54,7 +54,27 @@ final class LiveCaptionsViewModel {
     private let source: any LiveAudioSource
     private var recognizer: any StreamingTranscribing
     private let configService: ConfigService
-    private var partialsTask: Task<Void, Never>?
+
+    /// Consumes the recognizer's partials. `nonisolated(unsafe)` so `deinit`
+    /// — which runs outside the main actor — can cancel it. Safe because
+    /// `deinit` only runs once no other reference exists, so there is no
+    /// concurrent access, and `Task.cancel()` is itself thread-safe.
+    private nonisolated(unsafe) var partialsTask: Task<Void, Never>?
+
+    /// Single serial consumer of captured audio. See `startInternal`.
+    private nonisolated(unsafe) var audioTask: Task<Void, Never>?
+
+    /// Feeds `audioTask`. Finished on stop so the consumer loop exits.
+    private var audioContinuation: AsyncStream<AVAudioPCMBuffer>.Continuation?
+
+    /// Upper bound on buffered-but-unprocessed audio chunks.
+    ///
+    /// ScreenCaptureKit delivers roughly 25–50 buffers/second, so this is
+    /// about 3–5 seconds of slack. When ASR cannot keep up — the normal case
+    /// for a large model on an 8 GB machine — the oldest chunks are dropped
+    /// instead of queueing without bound. Losing audio degrades the
+    /// transcript; queueing it without bound degrades the whole machine.
+    private static let maxBufferedAudioChunks = 128
 
     init(
         source: any LiveAudioSource = SystemAudioCapture(),
@@ -97,7 +117,23 @@ final class LiveCaptionsViewModel {
         configService.update(cfg)
 
         Task {
-            if case .capturing = state { await stopInternal() }
+            // Tear down for every state that can own a live engine, not just
+            // `.capturing`. `.failed` is reachable *after* `recognizer.start()`
+            // succeeded (the SCStream error path), and the engine picker stays
+            // enabled there — so switching engines from a failed session used
+            // to drop a fully-loaded recognizer on the floor without stopping
+            // it, pinning its weights for the life of the process. One leaked
+            // model per switch.
+            switch state {
+            case .capturing, .loadingModel, .stopping:
+                await stopInternal()
+            case .failed:
+                teardownSession()
+                _ = try? await recognizer.finish()
+                state = .idle
+            case .idle:
+                break
+            }
             recognizer = Self.makeRecognizer(for: newEngine)
         }
     }
@@ -120,10 +156,17 @@ final class LiveCaptionsViewModel {
     /// Clear all captions (history + the in-progress line) and reset the
     /// session start time. Does not stop a running capture session — the
     /// next caption will start a fresh history.
+    ///
+    /// Also resets the engine's own session state. Clearing only the view
+    /// model used to be cosmetic: the recognizer still held the utterance in
+    /// progress, so the next partial re-populated the line the user had just
+    /// cleared.
     func clearTranscript() {
         history.removeAll()
         currentCaption = ""
         sessionStartedAt = nil
+        let recognizer = self.recognizer
+        Task { try? await recognizer.reset() }
     }
 
     /// Show a Save panel to write the transcript to disk as SRT.
@@ -193,7 +236,7 @@ final class LiveCaptionsViewModel {
         partialsTask = Task { [weak self] in
             for await update in stream {
                 guard let self else { break }
-                await self.applyUpdate(update)
+                self.applyUpdate(update)
             }
         }
 
@@ -202,17 +245,41 @@ final class LiveCaptionsViewModel {
         // may have a stale view of the TCC database. Instead let SCStream tell
         // us the truth on `startCapture()` and translate any failure into a
         // user-actionable error.
+        // One long-lived consumer, not a task per buffer.
+        //
+        // Spawning `Task.detached` per incoming buffer meant N unordered
+        // tasks racing into `appendAudio`, which resamples through a single
+        // stateful `AudioConverter` before hopping to the recognizer actor —
+        // an actual data race, and one that also scrambled sample order
+        // whenever more than one task was in flight. Worse, while the actor
+        // sat inside a multi-second decode every new buffer spawned another
+        // task holding another 48 kHz `AVAudioPCMBuffer` alive.
+        //
+        // A bounded stream with a single consumer restores ordering, removes
+        // the race, and converts overload from unbounded memory growth into
+        // bounded audio loss.
+        let (audioStream, audioCont) = AsyncStream<AVAudioPCMBuffer>.makeStream(
+            bufferingPolicy: .bufferingNewest(Self.maxBufferedAudioChunks)
+        )
+        audioContinuation = audioCont
+
         let recognizer = self.recognizer
+        audioTask = Task.detached(priority: .userInitiated) {
+            for await buffer in audioStream {
+                if Task.isCancelled { break }
+                try? await recognizer.appendAudio(buffer)
+            }
+        }
+
         do {
             try await source.start { buffer in
-                Task.detached(priority: .userInitiated) {
-                    try? await recognizer.appendAudio(buffer)
-                }
+                audioCont.yield(buffer)
             }
         } catch {
             logger.error("SCStream startCapture failed: \(error.localizedDescription, privacy: .public)")
-            partialsTask?.cancel()
-            partialsTask = nil
+            teardownSession()
+            // `reset()` rather than `finish()`: the engine stays loaded so a
+            // retry doesn't re-download, but the session state is cleared.
             try? await self.recognizer.reset()
             state = .failed(Self.captureErrorMessage(from: error))
             return
@@ -221,8 +288,22 @@ final class LiveCaptionsViewModel {
         state = .capturing
     }
 
+    /// Cancel the consumer tasks and close the audio stream. Safe to call
+    /// more than once and from any lifecycle state.
+    private func teardownSession() {
+        audioContinuation?.finish()
+        audioContinuation = nil
+        audioTask?.cancel()
+        audioTask = nil
+        partialsTask?.cancel()
+        partialsTask = nil
+    }
+
     private func stopInternal() async {
         await source.stop()
+        // Close the audio path before finishing the recognizer so no buffer
+        // arrives after `finish()` has torn down its continuation.
+        teardownSession()
 
         if let final = try? await recognizer.finish() {
             let trimmed = final.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -230,10 +311,20 @@ final class LiveCaptionsViewModel {
                 history.append(LiveCaptionEntry(text: trimmed, emittedAt: Date()))
             }
         }
-        partialsTask?.cancel()
-        partialsTask = nil
         currentCaption = ""
         state = .idle
+    }
+
+    /// Last-resort cleanup for the case where the window is closed without
+    /// the view's `.onDisappear` running (or before it does).
+    ///
+    /// Without this, closing the Live Captions window left the SCStream
+    /// capturing system audio indefinitely and pinned the loaded model for
+    /// the life of the process — the capture indicator stayed lit with no
+    /// window on screen.
+    deinit {
+        partialsTask?.cancel()
+        audioTask?.cancel()
     }
 
     private func applyUpdate(_ update: LiveCaptionUpdate) {
@@ -241,11 +332,27 @@ final class LiveCaptionsViewModel {
             let final = update.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !final.isEmpty, history.last?.text != final {
                 history.append(LiveCaptionEntry(text: final, emittedAt: update.timestamp))
+                trimHistoryIfNeeded()
             }
             currentCaption = ""
         } else {
             currentCaption = update.text
         }
+    }
+
+    /// Hard ceiling on retained caption lines.
+    ///
+    /// Now that engines commit per utterance, `history` grows for the whole
+    /// session instead of holding a single entry. At conversational pace this
+    /// is a few thousand lines an hour, so an all-day session needs a bound.
+    /// 5000 lines is roughly 8–12 hours of speech and a few hundred KB.
+    private static let maxHistoryEntries = 5000
+
+    private func trimHistoryIfNeeded() {
+        guard history.count > Self.maxHistoryEntries else { return }
+        let overflow = history.count - Self.maxHistoryEntries
+        history.removeFirst(overflow)
+        logger.info("Trimmed \(overflow, privacy: .public) caption line(s) past the history cap")
     }
 
     /// Build the recognizer for a chosen engine. Adding a future engine is

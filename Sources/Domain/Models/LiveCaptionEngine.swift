@@ -57,4 +57,29 @@ public enum LiveCaptionEngine: String, Codable, Sendable, CaseIterable {
         case .qwen3ASRLarge:        return "~740 MB"
         }
     }
+
+    /// Approximate resident weight size once loaded, in bytes.
+    ///
+    /// Distinct from `downloadSizeLabel`: what matters for whether a machine
+    /// can run an engine is what stays in memory, not what crossed the
+    /// network. Used to warn on memory-constrained machines.
+    public var approximateResidentBytes: UInt64 {
+        switch self {
+        case .nemotron:             return 700 * 1_048_576
+        case .zipformerZhXLarge:    return 570 * 1_048_576
+        case .paraformerTrilingual: return 999 * 1_048_576
+        case .qwen3ASRSmall:        return 420 * 1_048_576
+        case .qwen3ASRLarge:        return 780 * 1_048_576
+        }
+    }
+
+    /// Whether this engine runs a large language-model backbone, which costs
+    /// far more at runtime than the weights alone (activations, KV cache and
+    /// the MLX scratch pool).
+    public var isHeavyweight: Bool {
+        switch self {
+        case .qwen3ASRSmall, .qwen3ASRLarge: return true
+        case .nemotron, .zipformerZhXLarge, .paraformerTrilingual: return false
+        }
+    }
 }

@@ -49,16 +49,7 @@ public actor NemotronStreamingRecognizer: StreamingTranscribing {
             cont.yield(LiveCaptionUpdate(text: text))
         }
 
-        // Drain the engine's chunk queue every ~200 ms. Nemotron's API needs
-        // an explicit `processBufferedAudio()` to advance through complete
-        // chunks; doing it on a steady cadence keeps latency consistent.
-        let mgr = manager
-        processingTask = Task.detached(priority: .userInitiated) {
-            while !Task.isCancelled {
-                try? await mgr.processBufferedAudio()
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-        }
+        startDrainLoop()
 
         loaded = true
         let name = await manager.displayName
@@ -82,6 +73,16 @@ public actor NemotronStreamingRecognizer: StreamingTranscribing {
         let cont = await ensureContinuation()
         cont.yield(LiveCaptionUpdate(text: final, isFinal: true))
         cont.finish()
+
+        // Detach the callback before dropping our continuation. FluidAudio
+        // holds the escaping closure, and the closure captured the
+        // continuation strongly — so nilling `continuation` alone left the
+        // old one alive inside the manager, and a start → finish → start
+        // cycle stacked a second closure over a second continuation while
+        // the first was still retained. The API takes a non-optional
+        // closure, so a no-op capturing nothing is how it gets cleared.
+        await manager.setPartialTranscriptCallback { _ in }
+
         self.continuation = nil
         self.stream = nil
         loaded = false
@@ -93,16 +94,35 @@ public actor NemotronStreamingRecognizer: StreamingTranscribing {
         processingTask = nil
         try await manager.reset()
         // Restart the drain loop so the next session is immediately live.
-        let mgr = manager
-        processingTask = Task.detached(priority: .userInitiated) {
+        startDrainLoop()
+    }
+
+    // MARK: - Private
+
+    /// Drain the engine's chunk queue every ~200 ms. Nemotron's API needs an
+    /// explicit `processBufferedAudio()` to advance through complete chunks;
+    /// a steady cadence keeps latency consistent.
+    ///
+    /// Captures `self` weakly and **stops** when it goes away. The previous
+    /// version captured the FluidAudio manager strongly in a detached task
+    /// that was cancelled only from `finish()`/`reset()`. Any other way of
+    /// dropping the recognizer — closing the window, switching engines from
+    /// a failed state — left the task running forever, pinning the CoreML
+    /// weights for the life of the process and waking the CPU 5×/second with
+    /// nothing listening.
+    private func startDrainLoop() {
+        processingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await mgr.processBufferedAudio()
+                guard let self else { return }
+                await self.drainOnce()
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
     }
 
-    // MARK: - Private
+    private func drainOnce() async {
+        try? await manager.processBufferedAudio()
+    }
 
     private func ensureContinuation() async -> AsyncStream<LiveCaptionUpdate>.Continuation {
         if let continuation { return continuation }

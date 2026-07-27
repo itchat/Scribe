@@ -53,6 +53,11 @@ struct LiveCaptionsView: View {
         .frame(minWidth: 560, minHeight: 360)
         .navigationTitle("Live Captions")
         .toolbar { toolbar }
+        // Closing the window must end the session. Without this the
+        // ScreenCaptureKit stream kept capturing system audio with no window
+        // on screen — the macOS recording indicator stayed lit — and the
+        // loaded ASR model stayed resident for the life of the process.
+        .onDisappear { vm.stop() }
         // Apple Translation: re-fires whenever the user makes a fresh
         // selection (we mutate `translationConfig` to a new instance to
         // force a re-run). Body kept tight + inline because
@@ -313,6 +318,36 @@ struct LiveCaptionsView: View {
 
     // MARK: - Toolbar
 
+    /// Picker label, flagging engines this machine will struggle with.
+    ///
+    /// On a memory-constrained Mac the LLM-backbone engines need far more
+    /// than their weight size suggests, and the failure mode is swapping
+    /// rather than an error — so say so before the user commits to a ~1 GB
+    /// download.
+    private static func pickerLabel(for engine: LiveCaptionEngine) -> String {
+        isDemanding(engine)
+            ? "\(engine.displayName) — needs more memory"
+            : engine.displayName
+    }
+
+    /// Whether an engine is a poor fit for this machine's memory.
+    ///
+    /// Advisory, not a block: the user may know the machine is otherwise
+    /// idle, or only need a short session.
+    private static func isDemanding(_ engine: LiveCaptionEngine) -> Bool {
+        guard MemoryBudget.isConstrained else { return false }
+        return engine.isHeavyweight || !MemoryBudget.isComfortable(modelBytes: engine.approximateResidentBytes)
+    }
+
+    private var engineHelpText: String {
+        let base = "Pick the live-captions engine. Each one downloads its model on first use."
+        guard MemoryBudget.isConstrained else { return base }
+        return base + String(
+            format: " This Mac has %.0f GB of memory, so the larger engines may swap.",
+            MemoryBudget.physicalMemoryGB
+        )
+    }
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         // Engine picker on the leading edge — switching swaps the
@@ -328,12 +363,12 @@ struct LiveCaptionsView: View {
                 )
             ) {
                 ForEach(LiveCaptionEngine.allCases, id: \.self) { engine in
-                    Text(engine.displayName).tag(engine)
+                    Text(Self.pickerLabel(for: engine)).tag(engine)
                 }
             }
             .pickerStyle(.menu)
             .disabled(isEngineSwitchDisabled)
-            .help("Pick the live-captions engine. Each one downloads its model on first use.")
+            .help(engineHelpText)
         }
 
         // Secondary actions on the trailing side, before the Start/Stop

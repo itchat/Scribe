@@ -52,7 +52,13 @@ struct ScribeApp: App {
         }
 
         // Separate scene for live captions; opens via menu / ⌘⇧L.
-        WindowGroup("Live Captions", id: "live-captions") {
+        //
+        // `Window`, not `WindowGroup`: a group lets ⌘⇧L open a second copy,
+        // and each copy builds its own view model — two ScreenCaptureKit
+        // streams and two ~1 GB model loads for one user intent. There is
+        // only ever one live-captions session, so there should only ever be
+        // one window.
+        Window("Live Captions", id: "live-captions") {
             LiveCaptionsView()
         }
         .windowResizability(.contentMinSize)

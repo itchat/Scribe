@@ -33,15 +33,22 @@ public actor SherpaZipformerXLargeStreamingRecognizer: StreamingTranscribing {
     )
 
     private var recognizer: SherpaOnnxRecognizer?
-    private var committedSegments: [String] = []
     private var currentUtterance: String = ""
     private var lastYieldedText: String = ""
 
     private var continuation: AsyncStream<LiveCaptionUpdate>.Continuation?
     private var stream: AsyncStream<LiveCaptionUpdate>?
 
-    public init() {
+    /// ONNX Runtime intra-op threads for the encoder/joiner.
+    ///
+    /// The previous value was a literal `1`, which also happened to be the
+    /// helper's default — so it carried no intent and no justification. See
+    /// `ASRComputeBudget.sherpaThreadCount` for the measured basis.
+    private let numThreads: Int
+
+    public init(numThreads: Int = ASRComputeBudget.sherpaThreadCount) {
         self.audioConverter = AudioConverter(sampleRate: 16000)
+        self.numThreads = numThreads
     }
 
     public var partials: AsyncStream<LiveCaptionUpdate> {
@@ -77,7 +84,7 @@ public actor SherpaZipformerXLargeStreamingRecognizer: StreamingTranscribing {
         let modelConfig = sherpaOnnxOnlineModelConfig(
             tokens: modelDir.appendingPathComponent("tokens.txt").path,
             transducer: transducer,
-            numThreads: 1
+            numThreads: numThreads
         )
         let featConfig = sherpaOnnxFeatureConfig(sampleRate: 16_000, featureDim: 80)
         var config = sherpaOnnxOnlineRecognizerConfig(
@@ -89,7 +96,6 @@ public actor SherpaZipformerXLargeStreamingRecognizer: StreamingTranscribing {
 
         let r = withUnsafePointer(to: &config) { SherpaOnnxRecognizer(config: $0) }
         self.recognizer = r
-        self.committedSegments = []
         self.currentUtterance = ""
         self.lastYieldedText = ""
         logger.info("sherpa-onnx zh-xlarge streaming engine ready")
@@ -100,69 +106,67 @@ public actor SherpaZipformerXLargeStreamingRecognizer: StreamingTranscribing {
         await ingest(samples: samples)
     }
 
+    /// Flushes the trailing utterance. Earlier utterances were already
+    /// delivered as final updates, so the return value is the tail only.
     public func finish() async throws -> String {
         guard let r = recognizer else { return "" }
         r.inputFinished()
         while r.isReady() { r.decode() }
-        commitIfNeeded(currentText: r.getResult().text)
+        let tail = r.getResult().text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let final = composedTranscript()
         let cont = await ensureContinuation()
-        cont.yield(LiveCaptionUpdate(text: final, isFinal: true))
+        if !tail.isEmpty {
+            cont.yield(LiveCaptionUpdate(text: tail, isFinal: true))
+        }
         cont.finish()
 
         self.continuation = nil
         self.stream = nil
         self.recognizer = nil
-        self.committedSegments = []
         self.currentUtterance = ""
         self.lastYieldedText = ""
-        return final
+        return tail
     }
 
     public func reset() async throws {
         guard let r = recognizer else { return }
         r.reset()
-        committedSegments = []
         currentUtterance = ""
         lastYieldedText = ""
     }
 
     // MARK: - Private
 
+    /// Emits the current utterance only.
+    ///
+    /// This runs on **every** audio buffer — 25–50 times a second. The old
+    /// version joined every committed segment into one string here, compared
+    /// that against the previous full transcript, and stored another copy.
+    /// Two hours in, that was roughly 150 KB rebuilt, copied and compared
+    /// dozens of times per second, growing without bound for the whole
+    /// session. Emitting just the utterance makes the cost constant.
     private func ingest(samples: [Float]) async {
         guard let r = recognizer else { return }
         r.acceptWaveform(samples: samples, sampleRate: 16_000)
         while r.isReady() { r.decode() }
-        currentUtterance = r.getResult().text
+
+        let text = r.getResult().text.trimmingCharacters(in: .whitespacesAndNewlines)
+
         if r.isEndpoint() {
-            commitIfNeeded(currentText: currentUtterance)
             r.reset()
             currentUtterance = ""
-        }
-        let combined = composedTranscript()
-        if combined != lastYieldedText {
-            lastYieldedText = combined
+            lastYieldedText = ""
+            guard !text.isEmpty else { return }
             let cont = await ensureContinuation()
-            cont.yield(LiveCaptionUpdate(text: combined))
+            cont.yield(LiveCaptionUpdate(text: text, isFinal: true))
+            return
         }
-    }
 
-    private func commitIfNeeded(currentText: String) {
-        let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        committedSegments.append(trimmed)
-    }
-
-    private func composedTranscript() -> String {
-        let trimmedCurrent = currentUtterance.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedCurrent.isEmpty {
-            return committedSegments.joined(separator: " ")
-        }
-        if committedSegments.isEmpty {
-            return trimmedCurrent
-        }
-        return committedSegments.joined(separator: " ") + " " + trimmedCurrent
+        currentUtterance = text
+        guard text != lastYieldedText else { return }
+        lastYieldedText = text
+        let cont = await ensureContinuation()
+        cont.yield(LiveCaptionUpdate(text: text, isFinal: false))
     }
 
     private func ensureContinuation() async -> AsyncStream<LiveCaptionUpdate>.Continuation {

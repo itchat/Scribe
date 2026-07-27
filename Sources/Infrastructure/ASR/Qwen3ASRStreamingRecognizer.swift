@@ -98,6 +98,10 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
     /// `bufferStartAbs` is the absolute sample index (since session
     /// start) of `samples[0]`.
     private var samples: [Float] = []
+    /// Audio discarded since the last warning, for sparse logging.
+    private var droppedSampleCount: Int = 0
+    /// Frees the MLX cache when the system signals pressure.
+    private let pressureMonitor = MemoryPressureMonitor()
     private var bufferStartAbs: Int = 0
     /// Where the VAD processor has consumed up to (absolute index).
     private var processedAbs: Int = 0
@@ -175,10 +179,14 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
             // Cap the MLX GPU cache so a long Live Captions session can't
             // balloon to multiple GB — the cache reuses allocations across
             // transcribe() calls, but without a ceiling it grows monotonically
-            // for the lifetime of the process. 512 MB is generous for two
-            // models that fit in ~700 MB themselves plus the per-call
-            // working set.
-            MLX.Memory.cacheLimit = 512 * 1024 * 1024
+            // for the lifetime of the process.
+            //
+            // Scaled to the machine rather than fixed at 512 MB: this is a
+            // process-global setting, so on an 8 GB M1 a fixed 512 MB is ~7%
+            // of all memory held purely as reclaimable scratch, competing
+            // with the weights it is supposed to be serving.
+            MLX.Memory.cacheLimit = MemoryBudget.mlxCacheLimitBytes
+            MemoryBudget.logSummary()
         }
 
         // Always fresh-arm the per-session pieces — even when models stay
@@ -192,8 +200,34 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         }
         resetSessionState()
         startProcessingLoop()
+        startPressureMonitoring()
         if needsModels {
             logger.info("Qwen3-ASR \(label, privacy: .public) streaming engine ready")
+        }
+    }
+
+    /// Release discardable memory when the system asks for it, rather than
+    /// waiting for our own every-8-utterances cache flush to come around.
+    private func startPressureMonitoring() {
+        pressureMonitor.start { [weak self] level in
+            Task { await self?.relieveMemoryPressure(level) }
+        }
+    }
+
+    private func relieveMemoryPressure(_ level: MemoryPressureMonitor.Level) {
+        guard asrModel != nil else { return }
+        MLX.Memory.clearCache()
+        finalsSinceCacheFlush = 0
+        if level == .critical {
+            // Keep only what the decoder has not consumed yet. Under critical
+            // pressure a gap in the transcript is preferable to being killed.
+            let keepFrom = min(processedAbs, speechStartAbs ?? processedAbs)
+            let dropCount = max(0, keepFrom - bufferStartAbs)
+            if dropCount > 0, dropCount <= samples.count {
+                samples.removeFirst(dropCount)
+                bufferStartAbs += dropCount
+            }
+            logger.warning("Critical memory pressure — dropped consumed audio and flushed MLX cache")
         }
     }
 
@@ -207,6 +241,7 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
     public func finish() async throws -> String {
         processingTask?.cancel()
         processingTask = nil
+        pressureMonitor.stop()
 
         // Flush whatever the VAD was still holding so a final utterance
         // doesn't get dropped on stop.
@@ -265,12 +300,55 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
 
     // MARK: - Internal: queue
 
+    /// Hard ceiling on retained audio, in samples.
+    private var maxBufferedSamples: Int {
+        Int(MemoryBudget.maxLiveBufferSeconds * Double(Self.sampleRate))
+    }
+
     private func enqueue(_ newSamples: [Float]) {
         samples.append(contentsOf: newSamples)
+        enforceBufferCeiling()
+    }
+
+    /// Drop the oldest audio once the buffer exceeds its ceiling.
+    ///
+    /// `compactBuffer()` can only release audio the decoder has already
+    /// consumed, so it bounds the buffer *only while ASR keeps up with
+    /// realtime*. A 1.7B model on an 8 GB machine will not, and without this
+    /// the buffer grows at ~64 KB/s (≈230 MB/hour) for the whole session with
+    /// no back-pressure. Dropping the oldest audio loses transcript; not
+    /// dropping it loses the machine.
+    private func enforceBufferCeiling() {
+        let ceiling = maxBufferedSamples
+        guard samples.count > ceiling else { return }
+        let overflow = samples.count - ceiling
+        samples.removeFirst(overflow)
+        bufferStartAbs += overflow
+        // Consumed markers must not point before the surviving window.
+        processedAbs = max(processedAbs, bufferStartAbs)
+        if let start = speechStartAbs, start < bufferStartAbs {
+            speechStartAbs = bufferStartAbs
+        }
+        lastPartialAbs = max(lastPartialAbs, bufferStartAbs)
+        droppedSampleCount += overflow
+        // Log sparsely — once per ~10 s of dropped audio — so a struggling
+        // machine is diagnosable without flooding the log.
+        if droppedSampleCount >= Self.sampleRate * 10 {
+            let seconds = Double(droppedSampleCount) / Double(Self.sampleRate)
+            logger.warning(
+                "ASR falling behind realtime — dropped \(seconds, format: .fixed(precision: 1), privacy: .public)s of audio"
+            )
+            droppedSampleCount = 0
+        }
     }
 
     private func resetSessionState() {
-        samples.removeAll(keepingCapacity: true)
+        // `keepingCapacity: false` deliberately. Keeping it meant the buffer's
+        // high-water mark was retained for the life of the recognizer, so one
+        // session that ballooned held that allocation through every later
+        // session and after Stop.
+        samples.removeAll(keepingCapacity: false)
+        droppedSampleCount = 0
         bufferStartAbs = 0
         processedAbs = 0
         speechStartAbs = nil
@@ -288,7 +366,13 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         processingGeneration += 1
         processingTask = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.drain()
+                // `guard let … else { return }`, not `self?.drain()`. The
+                // weak capture already avoided a retain cycle, but once
+                // `self` was gone `self?.drain()` silently became a no-op
+                // and the loop kept spinning at 20 Hz for the life of the
+                // process — one orphan timer per abandoned recognizer.
+                guard let self else { return }
+                await self.drain()
                 // 50 ms is below the 200 ms cadence Nemotron uses but
                 // we want partials to fire close to the 1 s mark.
                 // VAD chunks are 512 samples / 32 ms so this still
@@ -363,7 +447,7 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         )
         guard !text.isEmpty else { return }
         currentLive = text
-        yieldCumulative(isFinal: false)
+        yieldUtterance(text, isFinal: false)
     }
 
     private func commitFinal(from startAbs: Int, upTo endAbs: Int) async {
@@ -378,7 +462,9 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         }
         appendCommitted(text)
         currentLive = ""
-        yieldCumulative(isFinal: false)
+        // The segment is settled — emit it as a final so the consumer can
+        // append it and clear the in-progress line.
+        yieldUtterance(text.trimmingCharacters(in: .whitespacesAndNewlines), isFinal: true)
 
         // Bounded cache pruning — every N finals we drop the MLX scratch
         // pool. Without this, long sessions leak GPU memory monotonically
@@ -406,17 +492,13 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         }
     }
 
-    private func yieldCumulative(isFinal: Bool) {
-        let cumulative: String
-        if currentLive.isEmpty {
-            cumulative = committed
-        } else if committed.isEmpty {
-            cumulative = currentLive
-        } else {
-            cumulative = committed + " " + currentLive
-        }
-        let cont = continuation ?? Self.makeFallbackContinuation(for: self)
-        cont?.yield(LiveCaptionUpdate(text: cumulative, isFinal: isFinal))
+    /// Emit a single utterance. `committed` is still maintained because
+    /// `finish()` returns the whole session transcript, but it is no longer
+    /// re-sent on every update — see `LiveCaptionUpdate` for why cumulative
+    /// updates were a problem.
+    private func yieldUtterance(_ text: String, isFinal: Bool) {
+        guard !text.isEmpty else { return }
+        continuation?.yield(LiveCaptionUpdate(text: text, isFinal: isFinal))
     }
 
     /// Slice `samples[startAbs…endAbs)` and feed it to Qwen3-ASR. The
@@ -470,16 +552,6 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
         if let continuation { return continuation }
         _ = await partials  // forces creation via `partials` getter
         return continuation!
-    }
-
-    /// Used by the synchronous `yieldCumulative` path when no consumer
-    /// has subscribed yet. Returns `nil` rather than blocking; partials
-    /// emitted before a subscriber attaches are simply dropped, which
-    /// matches the `bufferingNewest(1)` policy on the stream.
-    private static func makeFallbackContinuation(
-        for actor: Qwen3ASRStreamingRecognizer
-    ) -> AsyncStream<LiveCaptionUpdate>.Continuation? {
-        return nil
     }
 
     // MARK: - Test hooks

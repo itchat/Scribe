@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Domain
+import Core
 
 /// AppKit-backed selectable transcript pane for the Live Captions
 /// window. SwiftUI's `Text(...).textSelection(.enabled)` lets the user
@@ -52,25 +53,128 @@ struct SelectableTranscriptView: NSViewRepresentable {
         return scrollView
     }
 
+    /// Applies the smallest edit that brings the text view up to date.
+    ///
+    /// The previous version rebuilt the entire transcript, materialised the
+    /// whole document as a `String` to compare against it, and then called
+    /// `setAttributedString` — a full TextKit relayout — on every partial.
+    /// Because the old update model made `currentCaption` hold the *entire*
+    /// session transcript, that ran several times a second over a document
+    /// that grew all session. It also wiped the user's selection roughly once
+    /// a second, which is fatal for select-to-translate: the guard above only
+    /// skipped when the text was unchanged, which never happens while
+    /// captions stream.
+    ///
+    /// Now history lines are append-only and only the short trailing live run
+    /// is rewritten, so the cost is proportional to what changed.
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
-        let attributed = Self.makeAttributed(history: history, currentCaption: currentCaption)
-        // Only rebuild if the visible text actually changed — avoids
-        // wiping the user's in-progress selection on every partial.
-        let oldText = textView.attributedString().string
-        let newText = attributed.string
-        guard oldText != newText else { return }
+        guard let textView = scrollView.documentView as? NSTextView,
+              let storage = textView.textStorage else { return }
+        let coordinator = context.coordinator
+
+        let selection = textView.selectedRange()
+        let liveRange = NSRange(location: coordinator.committedLength, length: coordinator.liveLength)
+
+        // Editing the live run would destroy a selection that overlaps it.
+        // Skip this cycle instead; the next update catches up once the user
+        // has finished with the selection.
+        if selection.length > 0, NSIntersectionRange(selection, liveRange).length > 0 {
+            return
+        }
 
         let wasNearBottom = Self.isScrolledNearBottom(scrollView)
-        textView.textStorage?.setAttributedString(attributed)
 
-        if wasNearBottom {
-            // Defer scroll to next runloop so AppKit has settled the new
-            // layout before we ask it for the trailing position.
-            DispatchQueue.main.async {
-                textView.scrollToEndOfDocument(nil)
-            }
+        // Anything that invalidates our incremental bookkeeping — history
+        // cleared, trimmed at the cap, or the storage mutated behind us —
+        // falls back to a full rebuild.
+        let bookkeepingValid = history.count >= coordinator.renderedHistoryCount
+            && storage.length == coordinator.committedLength + coordinator.liveLength
+        guard bookkeepingValid else {
+            let attributed = Self.makeAttributed(history: history, currentCaption: currentCaption)
+            storage.setAttributedString(attributed)
+            coordinator.renderedHistoryCount = history.count
+            coordinator.committedLength = Self.committedLength(of: history)
+            coordinator.liveLength = storage.length - coordinator.committedLength
+            coordinator.renderedTail = Self.renderedTail(of: history)
+            coordinator.renderedLive = currentCaption.trimmingCharacters(in: .whitespacesAndNewlines)
+            Self.scrollIfNeeded(textView, wasNearBottom: wasNearBottom)
+            return
         }
+
+        let newLive = currentCaption.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasNewHistory = history.count > coordinator.renderedHistoryCount
+        let liveChanged = newLive != coordinator.renderedLive
+        guard hasNewHistory || liveChanged else { return }
+
+        storage.beginEditing()
+
+        // Drop the old live run so new history lands before it.
+        if coordinator.liveLength > 0 {
+            storage.replaceCharacters(in: liveRange, with: "")
+            coordinator.liveLength = 0
+        }
+
+        if hasNewHistory {
+            for entry in history[coordinator.renderedHistoryCount...] {
+                let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                // Flow into running text rather than one line per entry —
+                // see `CaptionFlow` for why an utterance is not a line.
+                let separator = coordinator.renderedTail.isEmpty
+                    ? ""
+                    : CaptionFlow.separator(after: coordinator.renderedTail, before: text)
+                let run = NSAttributedString(
+                    string: separator + text,
+                    attributes: Self.historyAttributes
+                )
+                storage.append(run)
+                coordinator.committedLength += run.length
+                coordinator.renderedTail = text
+            }
+            coordinator.renderedHistoryCount = history.count
+        }
+
+        if !newLive.isEmpty {
+            let separator = coordinator.renderedTail.isEmpty
+                ? ""
+                : CaptionFlow.separator(after: coordinator.renderedTail, before: newLive)
+            let run = NSAttributedString(string: separator + newLive, attributes: Self.liveAttributes)
+            storage.append(run)
+            coordinator.liveLength = run.length
+        }
+        coordinator.renderedLive = newLive
+
+        storage.endEditing()
+
+        // The committed prefix never moves, so a selection inside it stays
+        // valid; restore it explicitly since AppKit may still have reset it.
+        if selection.length > 0, selection.location + selection.length <= coordinator.committedLength {
+            textView.setSelectedRange(selection)
+        }
+
+        Self.scrollIfNeeded(textView, wasNearBottom: wasNearBottom)
+    }
+
+    private static func scrollIfNeeded(_ textView: NSTextView, wasNearBottom: Bool) {
+        guard wasNearBottom else { return }
+        // Defer scroll to next runloop so AppKit has settled the new
+        // layout before we ask it for the trailing position.
+        DispatchQueue.main.async {
+            textView.scrollToEndOfDocument(nil)
+        }
+    }
+
+    /// UTF-16 length the flowed history occupies. Must match exactly what
+    /// `makeAttributed` produced, or the incremental path's bookkeeping check
+    /// fails and every update degrades to a full rebuild.
+    private static func committedLength(of history: [LiveCaptionEntry]) -> Int {
+        (CaptionFlow.joined(history) as NSString).length
+    }
+
+    /// Trailing committed utterance after a full rebuild.
+    private static func renderedTail(of history: [LiveCaptionEntry]) -> String {
+        history.last { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }?
+            .text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     // MARK: - Coordinator
@@ -79,6 +183,19 @@ struct SelectableTranscriptView: NSViewRepresentable {
         weak var textView: NSTextView?
         private let onSelectionChange: (String) -> Void
         private var lastReported: String = ""
+
+        // Incremental-rendering bookkeeping. See `updateNSView`.
+        /// History entries already written into the text storage.
+        var renderedHistoryCount = 0
+        /// Characters occupied by those entries (the immutable prefix).
+        var committedLength = 0
+        /// Characters occupied by the trailing in-progress run.
+        var liveLength = 0
+        /// Text of that run, so an unchanged partial is a no-op.
+        var renderedLive = ""
+        /// Last committed utterance, so the next one can pick the right
+        /// separator without re-reading the storage.
+        var renderedTail = ""
 
         init(onSelectionChange: @escaping (String) -> Void) {
             self.onSelectionChange = onSelectionChange
@@ -112,25 +229,36 @@ struct SelectableTranscriptView: NSViewRepresentable {
         currentCaption: String
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        let historyAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.preferredFont(forTextStyle: .body),
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .paragraphStyle: paragraphStyle,
-        ]
-        let liveAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.preferredFont(forTextStyle: .body),
-            .foregroundColor: NSColor.labelColor,
-            .paragraphStyle: paragraphStyle,
-        ]
-        for entry in history {
-            result.append(NSAttributedString(string: entry.text + "\n", attributes: historyAttrs))
+        let committed = CaptionFlow.joined(history)
+        if !committed.isEmpty {
+            result.append(NSAttributedString(string: committed, attributes: historyAttributes))
         }
         let trimmedLive = currentCaption.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedLive.isEmpty {
-            result.append(NSAttributedString(string: trimmedLive, attributes: liveAttrs))
+            let separator = committed.isEmpty
+                ? ""
+                : CaptionFlow.separator(after: committed, before: trimmedLive)
+            result.append(NSAttributedString(string: separator + trimmedLive, attributes: liveAttributes))
         }
         return result
     }
+
+    /// Settled lines. Rendered in the primary label colour — this is the text
+    /// the reader actually dwells on, so it should not be the dimmer of the
+    /// two (it previously used `secondaryLabelColor` while the transient
+    /// partial got full contrast).
+    static let historyAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.preferredFont(forTextStyle: .body),
+        .foregroundColor: NSColor.labelColor,
+        .paragraphStyle: paragraphStyle,
+    ]
+
+    /// The in-progress line, de-emphasised because it is still changing.
+    static let liveAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.preferredFont(forTextStyle: .body),
+        .foregroundColor: NSColor.secondaryLabelColor,
+        .paragraphStyle: paragraphStyle,
+    ]
 
     private static let paragraphStyle: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()
