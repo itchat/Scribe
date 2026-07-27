@@ -26,9 +26,18 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
 
         progress?.reportStatus("Transcribing audio...")
 
-        let result = try await manager.transcribe(url)
+        // FluidAudio 0.15 threads the TDT decoder state through the caller so
+        // a streaming consumer can carry it across chunks. The burn pipeline
+        // transcribes each file in one shot, so a fresh state per call is
+        // correct — carrying it over would leak the previous file's decoder
+        // context into the next item in the queue.
+        var decoderState = try TdtDecoderState()
+        let result = try await manager.transcribe(url, decoderState: &decoderState)
 
-        logger.info("Transcription completed: \(result.text.prefix(50), privacy: .public)... (\(result.duration, format: .fixed(precision: 1))s audio, \(result.rtfx, format: .fixed(precision: 0))x realtime)")
+        // Timings are public (they are the only perf instrumentation in the
+        // app); the transcript itself is the user's speech and stays private.
+        logger.info("Transcription completed: \(result.text.count, privacy: .public) chars, \(result.duration, format: .fixed(precision: 1), privacy: .public)s audio, \(result.rtfx, format: .fixed(precision: 0), privacy: .public)x realtime")
+        logger.debug("Transcript preview: \(result.text.prefix(50), privacy: .private)")
 
         return convertResult(result)
     }
@@ -38,6 +47,22 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
     /// Whether the ASR model is downloaded and ready.
     public var isModelReady: Bool {
         models != nil
+    }
+
+    /// Release the loaded CoreML models, keeping the on-disk cache.
+    ///
+    /// `ASRModelService` holds this recognizer for the whole app lifetime, so
+    /// without an explicit unload Parakeet's ~1.2 GB stayed resident after the
+    /// burn queue drained. A user who transcribed a video and then opened Live
+    /// Captions with Qwen3 1.7B carried ~2 GB of weights at once — enough to
+    /// push an 8 GB machine into swap. The next `transcribe` reloads from the
+    /// local cache, so the cost of being wrong here is a reload, not a
+    /// re-download.
+    public func unload() {
+        guard asrManager != nil || models != nil else { return }
+        asrManager = nil
+        models = nil
+        logger.info("ASR models unloaded")
     }
 
     /// Whether the model files exist on disk (but may not be loaded).
@@ -59,7 +84,7 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
         logger.info("Downloading ASR model v2...")
 
         if let progressHandler {
-            let handler: DownloadUtils.ProgressHandler = { progress in
+            let handler: ProgressHandler = { progress in
                 progressHandler(progress.fractionCompleted)
             }
             try await AsrModels.download(version: version, progressHandler: handler)
@@ -86,7 +111,7 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
             logger.info("Loading ASR model v2 from cache...")
         }
 
-        let handler: DownloadUtils.ProgressHandler = { [weak progress] dlProgress in
+        let handler: ProgressHandler = { [weak progress] dlProgress in
             let percent = Int(dlProgress.fractionCompleted * 100)
             progress?.reportStatus("Downloading ASR model... \(percent)%")
             // Map download progress to the 10-20% pipeline range

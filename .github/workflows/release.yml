@@ -26,13 +26,14 @@ jobs:
       - name: Log Swift version
         run: swift --version
 
+      # No `restore-keys` fallback — see the matching comment in ci.yml. A
+      # release build is the last place we want to link artifacts produced
+      # against a different dependency set.
       - name: Cache SPM dependencies
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift') }}
 
       - name: Install ffmpeg-full + dylibbundler
         run: brew install ffmpeg-full dylibbundler
