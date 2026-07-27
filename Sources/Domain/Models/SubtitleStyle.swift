@@ -108,14 +108,30 @@ public struct SubtitleStyle: Codable, Sendable, Equatable {
         case marginVertical, marginHorizontal
     }
 
+    /// `,` and `=` are libass's own separators inside a `force_style`
+    /// payload and libass offers no escape for them, so they must not
+    /// survive in a font name. `'` is stripped for the same reason at the
+    /// ffmpeg layer. Every other field is an `Int` or an enum, so the font
+    /// name is the only free-text input here.
+    ///
+    /// The UI picks `fontName` from a fixed list, but `config.json` is a
+    /// plain file the user can edit, so a name like `X,FontSize=200` would
+    /// otherwise silently override later style fields.
+    private static func sanitizedFontName(_ name: String) -> String {
+        let cleaned = name.filter { $0 != "," && $0 != "=" && $0 != "'" }
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "New York" : cleaned
+    }
+
     /// Emit the comma-separated `force_style=...` payload that ffmpeg's
-    /// `subtitles` filter accepts. Caller wraps it with the surrounding
-    /// `subtitles='path':force_style='...'` shell-safe quoting.
+    /// `subtitles` filter accepts. The caller is responsible for escaping
+    /// the result for the filtergraph — see
+    /// `FFmpegCommandBuilder.escapeFilterValue`.
     public func assForceStyle() -> String {
         let primaryHex = String(format: "&H%06X", primaryColorARGB & 0x00FFFFFF)
         let outlineHex = String(format: "&H%06X", outlineColorARGB & 0x00FFFFFF)
         return [
-            "FontName=\(fontName)",
+            "FontName=\(Self.sanitizedFontName(fontName))",
             "FontSize=\(fontSize)",
             "PrimaryColour=\(primaryHex)",
             "OutlineColour=\(outlineHex)",

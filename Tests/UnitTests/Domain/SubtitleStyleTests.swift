@@ -119,4 +119,35 @@ struct SubtitleStyleTests {
         #expect(payload.contains("OutlineColour=&HFFFFFF"))
         #expect(payload.contains("BorderStyle=4"))
     }
+
+    // MARK: - Font name sanitisation
+
+    /// libass has no escape mechanism for its own `,` and `=` separators, so
+    /// a font name carrying them would silently override later style keys.
+    /// The Settings picker can't produce such a name, but `config.json` is
+    /// user-editable.
+    @Test("Strips libass separators from a hand-edited font name")
+    func sanitisesFontNameSeparators() {
+        var s = SubtitleStyle()
+        s.fontName = "Evil,FontSize=200"
+        let payload = s.assForceStyle()
+        #expect(payload.contains("FontName=EvilFontSize200"))
+        #expect(payload.contains("FontSize=\(s.fontSize)"))
+        // Exactly one FontSize key — the injected one must not survive.
+        #expect(payload.components(separatedBy: "FontSize=").count - 1 == 1)
+    }
+
+    @Test("Falls back to the default font when sanitising empties the name")
+    func sanitisesFontNameToDefault() {
+        var s = SubtitleStyle()
+        s.fontName = ",,==''"
+        #expect(s.assForceStyle().contains("FontName=New York"))
+    }
+
+    @Test("Leaves ordinary font names untouched")
+    func leavesNormalFontNames() {
+        var s = SubtitleStyle()
+        s.fontName = "Hiragino Sans GB"
+        #expect(s.assForceStyle().contains("FontName=Hiragino Sans GB"))
+    }
 }
