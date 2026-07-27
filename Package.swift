@@ -36,6 +36,19 @@ let package = Package(
         // changes into both Infrastructure and the test targets (which
         // import Qwen3ASR/SpeechVAD types directly).
         .package(url: "https://github.com/soniqo/speech-swift.git", exact: "0.0.23"),
+        // mlx-swift arrives transitively through speech-swift; it is declared
+        // here only to bound its version. 0.31.5 raised its manifest to
+        // swift-tools-version 6.3, which fails outright on a toolchain older
+        // than that:
+        //
+        //   error: 'mlx-swift': package 'mlx-swift' @ 0.31.6 is using Swift
+        //   tools version 6.3.0 but the installed version is 6.2.4
+        //
+        // GitHub's macos runner at `latest-stable` is still on 6.2.4, so
+        // resolving to the newest tag builds locally and breaks CI. Hold at
+        // the newest release that a 6.2 toolchain can read until the runner
+        // image catches up.
+        .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.0" ..< "0.31.5"),
     ],
     targets: [
         // ── Domain: Pure value types, zero dependencies ──
