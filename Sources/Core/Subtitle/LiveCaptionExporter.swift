@@ -44,17 +44,23 @@ public enum LiveCaptionExporter {
         return SRTWriter.write(subtitleEntries)
     }
 
-    /// Plain text — one caption per line.
+    /// Plain text, flowed the way the transcript window shows it.
+    ///
+    /// Not one line per entry: an entry is an utterance, and a VAD-driven
+    /// engine ends utterances mid-sentence, so line-per-entry produces a
+    /// column of fragments rather than readable prose. SRT keeps per-entry
+    /// granularity because cues genuinely need it — see `CaptionFlow`.
     public static func plainText(entries: [LiveCaptionEntry]) -> String {
-        entries.map(\.text).joined(separator: "\n")
+        CaptionFlow.joined(entries)
     }
 
-    /// All caption text concatenated for clipboard copy. Same shape as plain
-    /// text export; kept as a separate method for callsite clarity.
+    /// Everything on screen, for clipboard copy — settled text plus the
+    /// in-progress line, joined the same way the window renders them.
     public static func clipboardString(entries: [LiveCaptionEntry], current: String) -> String {
-        var lines = entries.map(\.text)
+        let settled = CaptionFlow.joined(entries)
         let trimmedCurrent = current.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedCurrent.isEmpty { lines.append(trimmedCurrent) }
-        return lines.joined(separator: "\n")
+        guard !trimmedCurrent.isEmpty else { return settled }
+        guard !settled.isEmpty else { return trimmedCurrent }
+        return settled + CaptionFlow.separator(after: settled, before: trimmedCurrent) + trimmedCurrent
     }
 }

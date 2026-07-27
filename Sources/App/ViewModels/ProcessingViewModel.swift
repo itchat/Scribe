@@ -211,6 +211,10 @@ final class ProcessingViewModel {
             await processQueue()
             isProcessing = false
             modelService.refresh()
+            // The queue is drained, so drop the ~1.2 GB of CoreML weights
+            // rather than holding them for the rest of the session. Reloads
+            // from the local cache if the user starts another run.
+            await modelService.unloadModels()
 
             let succeeded = videoItems.filter { $0.state == .completed }.count
             let failed = videoItems.filter { $0.state == .failed }.count

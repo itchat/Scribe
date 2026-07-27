@@ -26,13 +26,31 @@ jobs:
       - name: Log Swift version
         run: swift --version
 
+      # build-app.sh compiles MLX's Metal kernels into mlx.metallib, without
+      # which the Qwen3 engines abort at launch. Xcode 16.3+ ships the shader
+      # compiler as a separately-downloaded component that is not always
+      # present on a runner image, and `xcrun --find metal` succeeds even when
+      # it is missing — so probe by compiling, and fetch it only if needed.
+      - name: Ensure Metal toolchain
+        run: |
+          if echo 'kernel void _probe() {}' \
+              | xcrun -sdk macosx metal -x metal -c - -o /dev/null >/dev/null 2>&1; then
+            echo "Metal toolchain already available"
+          else
+            echo "Metal toolchain missing — downloading"
+            xcodebuild -downloadComponent MetalToolchain
+            echo 'kernel void _probe() {}' \
+              | xcrun -sdk macosx metal -x metal -c - -o /dev/null
+          fi
+
+      # No `restore-keys` fallback — see the matching comment in ci.yml. A
+      # release build is the last place we want to link artifacts produced
+      # against a different dependency set.
       - name: Cache SPM dependencies
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift') }}
 
       - name: Install ffmpeg-full + dylibbundler
         run: brew install ffmpeg-full dylibbundler

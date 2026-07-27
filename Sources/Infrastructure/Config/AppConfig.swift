@@ -151,7 +151,9 @@ public struct AppConfig: Codable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(baseURL, forKey: .baseURL)
-        try c.encode(apiKey, forKey: .apiKey)
+        // `apiKey` is deliberately NOT encoded — it lives in the Keychain via
+        // `SecretStoring`. The coding key is retained so old config files
+        // containing a plaintext key still decode and can be migrated.
         try c.encode(model, forKey: .model)
         try c.encode(customPrompt, forKey: .customPrompt)
         try c.encode(maxCharsPerBatch, forKey: .maxCharsPerBatch)
@@ -177,7 +179,15 @@ public struct AppConfig: Codable, Sendable {
             .appendingPathComponent(Constants.configFileName)
     }
 
-    public func save(to url: URL? = nil) throws {
+    /// Persist the config.
+    ///
+    /// The API key goes to `secrets`, not into the JSON. It used to be
+    /// written as plaintext alongside everything else, and because
+    /// `Data.write(options: .atomic)` applies no POSIX mode the file landed
+    /// at the umask default of 0644 — readable by any local user or
+    /// unsandboxed process. The remaining fields are preferences, but the
+    /// file is still tightened to 0600 since it also records file paths.
+    public func save(to url: URL? = nil, secrets: any SecretStoring = KeychainSecretStore()) throws {
         let fileURL = url ?? Self.defaultFileURL
         let dir = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -186,12 +196,38 @@ public struct AppConfig: Codable, Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
         try data.write(to: fileURL, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+
+        secrets.writeAPIKey(apiKey)
     }
 
-    public static func load(from url: URL? = nil) throws -> AppConfig {
+    public static func load(
+        from url: URL? = nil,
+        secrets: any SecretStoring = KeychainSecretStore()
+    ) throws -> AppConfig {
         let fileURL = url ?? defaultFileURL
         let data = try Data(contentsOf: fileURL)
-        return try JSONDecoder().decode(AppConfig.self, from: data)
+        var config = try JSONDecoder().decode(AppConfig.self, from: data)
+
+        // `config.apiKey` currently holds whatever the JSON carried, which is
+        // non-empty only for files written before the key moved to the
+        // Keychain. Migrate that value across once, then let the secret store
+        // be the source of truth.
+        let legacyKey = config.apiKey
+        if let stored = secrets.readAPIKey(), !stored.isEmpty {
+            config.apiKey = stored
+        } else if !legacyKey.isEmpty {
+            secrets.writeAPIKey(legacyKey)
+            // Rewrite without the plaintext key. Best-effort: a failure here
+            // only means the migration retries next launch.
+            try? config.save(to: fileURL, secrets: secrets)
+        } else {
+            config.apiKey = ""
+        }
+        return config
     }
 
     // MARK: - Validation
@@ -201,8 +237,20 @@ public struct AppConfig: Codable, Sendable {
     public func validate(for mode: TranslationMode) -> [String] {
         var issues: [String] = []
 
-        if mode == .openAI && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        guard mode == .openAI else { return issues }
+
+        if apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             issues.append("API key is required for OpenAI translation")
+        }
+
+        // Mirrors the check in `OpenAITranslator.makeAPIRequest`. Validating
+        // here means a typo surfaces in Settings rather than after the user
+        // has queued a batch of videos and waited for transcription.
+        let trimmedBase = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedBase.isEmpty {
+            issues.append("Base URL is required for OpenAI translation")
+        } else if URL(string: "\(trimmedBase)/v1/chat/completions")?.host == nil {
+            issues.append("Base URL \"\(baseURL)\" is not a valid URL")
         }
 
         return issues

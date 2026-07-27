@@ -9,15 +9,37 @@ public enum FFmpegCommandBuilder {
 
     // MARK: - Path Escaping
 
-    /// Escape a file path for use in FFmpeg's subtitles filter.
-    /// Backslash must be escaped first to avoid double-escaping.
-    public static func escapeSubtitlePath(_ path: String) -> String {
-        var escaped = path
-        escaped = escaped.replacingOccurrences(of: "\\", with: "\\\\")
-        escaped = escaped.replacingOccurrences(of: "'", with: "\\'")
-        escaped = escaped.replacingOccurrences(of: ":", with: "\\:")
-        escaped = escaped.replacingOccurrences(of: "[", with: "\\[")
-        escaped = escaped.replacingOccurrences(of: "]", with: "\\]")
+    /// Characters that must be escaped before a value can be embedded in a
+    /// filtergraph. `,` and `;` separate filters, `[` and `]` delimit pad
+    /// labels, `:` separates a filter's arguments, `=` separates key from
+    /// value, and `'` opens a quoted run.
+    private static let filterSpecialCharacters: [String] = ["'", ":", "[", "]", ",", ";", "="]
+
+    /// Escape a value for embedding in an FFmpeg filtergraph argument.
+    ///
+    /// FFmpeg unescapes filtergraph values through **three** layers (the
+    /// graph parser, the filter's argument parser, then `av_get_token`), so
+    /// a single backslash is consumed before it ever reaches the filter.
+    /// The result must be used **unquoted** — wrapping the output in `'…'`
+    /// re-breaks it.
+    ///
+    /// The previous implementation escaped with a single backslash *and*
+    /// wrapped the result in single quotes. That combination silently
+    /// dropped apostrophes: a file named `John's talk.srt` reached libass
+    /// as `Johns talk.srt`, which does not exist, so the burn failed. It
+    /// was also an injection vector, since the apostrophe terminated the
+    /// quoted run and let the remainder of the filename be parsed as
+    /// filtergraph syntax.
+    ///
+    /// Escaping levels were established empirically against ffmpeg by
+    /// round-tripping each special character through a real `subtitles=`
+    /// filter; see `FFmpegCommandBuilderTests`.
+    public static func escapeFilterValue(_ value: String) -> String {
+        // Backslash first, or we would escape the backslashes we insert.
+        var escaped = value.replacingOccurrences(of: "\\", with: #"\\\\"#)
+        for character in filterSpecialCharacters {
+            escaped = escaped.replacingOccurrences(of: character, with: #"\\\"# + character)
+        }
         return escaped
     }
 
@@ -85,18 +107,24 @@ public enum FFmpegCommandBuilder {
         videoWidth: Int,
         videoHeight: Int
     ) -> [String] {
-        let escapedPath = escapeSubtitlePath(subtitlePath)
+        let escapedPath = escapeFilterValue(subtitlePath)
         // libass on macOS uses fontconfig, which by default doesn't index
         // /System/Library/Fonts — so without an explicit `fontsdir`, a
         // request for "New York" falls through to a Verdana-like default.
         // Pointing it at the system font directory makes the FontName=...
         // in our force_style payload actually take effect.
-        let fontsDir = escapeSubtitlePath("/System/Library/Fonts")
+        let fontsDir = escapeFilterValue("/System/Library/Fonts")
+        // `force_style` is escaped as a whole. Its internal `=` and `,` are
+        // structural *for libass*, but to ffmpeg they are ordinary bytes
+        // that must survive the filtergraph parser — escaping them here
+        // means libass receives them intact. Values are deliberately not
+        // quoted; see `escapeFilterValue`.
+        let forceStyle = escapeFilterValue(style.assForceStyle())
         let subtitleFilter =
-            "subtitles='\(escapedPath)'" +
-            ":fontsdir='\(fontsDir)'" +
+            "subtitles=\(escapedPath)" +
+            ":fontsdir=\(fontsDir)" +
             ":original_size=\(videoWidth)x\(videoHeight)" +
-            ":force_style='\(style.assForceStyle())'"
+            ":force_style=\(forceStyle)"
 
         if useHardwareAccel {
             return [

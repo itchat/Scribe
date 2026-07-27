@@ -124,7 +124,7 @@ public final class FFmpegVideoComposer: VideoComposing, @unchecked Sendable {
     /// size off the shorter dimension — `min(width, height) / 24` — so
     /// portrait clips don't get oversized cues.
     private func getVideoDimensions(_ videoURL: URL) -> (width: Int, height: Int)? {
-        let ffprobePath = ffmpegPath.replacingOccurrences(of: "ffmpeg", with: "ffprobe")
+        let ffprobePath = FFmpegLocator.ffprobePath(forFFmpegAt: ffmpegPath)
         guard FFmpegLocator.exists(at: ffprobePath) else { return nil }
 
         let process = Process()
@@ -159,7 +159,7 @@ public final class FFmpegVideoComposer: VideoComposing, @unchecked Sendable {
     }
 
     private func getVideoDuration(_ videoURL: URL) -> TimeInterval? {
-        let ffprobePath = ffmpegPath.replacingOccurrences(of: "ffmpeg", with: "ffprobe")
+        let ffprobePath = FFmpegLocator.ffprobePath(forFFmpegAt: ffmpegPath)
         guard FFmpegLocator.exists(at: ffprobePath) else { return nil }
 
         let process = Process()

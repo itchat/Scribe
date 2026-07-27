@@ -17,14 +17,25 @@ set -euo pipefail
 #   ./scripts/fetch-sherpa-onnx.sh         # fetch if missing
 #   ./scripts/fetch-sherpa-onnx.sh --force # re-fetch even if present
 
-SHERPA_VERSION="v1.13.0"
+SHERPA_VERSION="v1.13.4"
 # sherpa-onnx ${SHERPA_VERSION}'s macOS static lib is built against a
 # **specific** ONNX Runtime version (see cmake/onnxruntime-osx-universal-static.cmake
 # in the upstream repo at this tag). Mixing in an older ORT triggers a
 # silent ABI mismatch — Ort::Env's vtable layout has changed across
 # versions, and the resulting null-vtable read inside Env::Env() segfaults
 # during recognizer construction. Track upstream when bumping SHERPA_VERSION.
-ORT_VERSION="1.24.4"
+#
+# To re-derive after a version bump:
+#   curl -s https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$SHERPA_VERSION/cmake/onnxruntime-osx-universal-static.cmake \
+#     | grep onnxruntime_URL
+# Note this is NOT simply "the latest ORT" — v1.13.4 pairs with 1.27.0 even
+# though 1.27.1 exists. Nothing in the build or the type system catches a
+# mismatch; the only guard is Tests/IntegrationTests/SherpaOnnxSmokeTests.swift,
+# which must be run after any change to either version below.
+ORT_VERSION="1.27.0"
+# SHA-256 of the ORT archive, published by the same upstream CMake file that
+# pins the version. Verified before extraction — see the download step.
+ORT_SHA256="6794da8dd86d0b83b453e7968771cddfb3004e3db4cda5cea6d4111a616f49cb"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR_DIR="$PROJECT_DIR/vendor"
 XCF_NAME="sherpa-onnx.xcframework"
@@ -97,6 +108,26 @@ find "$VENDOR_DIR" -maxdepth 1 -type d -name "sherpa-onnx-${SHERPA_VERSION}-maco
 ORT_ZIP_PATH="$VENDOR_DIR/onnxruntime-osx-universal2-static_lib-${ORT_VERSION}.zip"
 echo "[3/4] Downloading ONNX Runtime ${ORT_VERSION} (~34 MB compressed)..."
 curl -fL --progress-bar -o "$ORT_ZIP_PATH" "$ORT_ZIP_URL"
+
+# GitHub release assets are mutable by the repo owner, so HTTPS gives us
+# transport security but says nothing about artifact integrity. This archive
+# is statically linked into the shipped app, so verify it against the digest
+# upstream publishes alongside the version pin.
+echo "  Verifying SHA-256..."
+ACTUAL_ORT_SHA=$(shasum -a 256 "$ORT_ZIP_PATH" | cut -d' ' -f1)
+if [ "$ACTUAL_ORT_SHA" != "$ORT_SHA256" ]; then
+    echo "" >&2
+    echo "ERROR: ONNX Runtime checksum mismatch — refusing to extract." >&2
+    echo "  expected: $ORT_SHA256" >&2
+    echo "  actual:   $ACTUAL_ORT_SHA" >&2
+    echo "" >&2
+    echo "  Either the upstream asset changed, or the download was corrupted." >&2
+    echo "  Re-derive the expected digest from onnxruntime_HASH in:" >&2
+    echo "    https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/${SHERPA_VERSION}/cmake/onnxruntime-osx-universal-static.cmake" >&2
+    rm -f "$ORT_ZIP_PATH"
+    exit 1
+fi
+echo "  SHA-256 OK"
 
 EXTRACT_TMP="$VENDOR_DIR/_ort_extract"
 rm -rf "$EXTRACT_TMP"

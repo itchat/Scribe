@@ -24,7 +24,7 @@ public final class FFmpegAudioProbe: AudioProbing, @unchecked Sendable {
         // Use ffprobe to query stream metadata directly — much more robust
         // than grepping ffmpeg's stderr, which contains noise like
         // `audio:0KiB` in its summary line for video-only files.
-        let ffprobePath = ffmpegPath.replacingOccurrences(of: "ffmpeg", with: "ffprobe")
+        let ffprobePath = FFmpegLocator.ffprobePath(forFFmpegAt: ffmpegPath)
         let cmd = [
             ffprobePath,
             "-v", "error",
@@ -43,7 +43,7 @@ public final class FFmpegAudioProbe: AudioProbing, @unchecked Sendable {
     }
 
     public func duration(of audioURL: URL) async throws -> TimeInterval {
-        let ffprobePath = ffmpegPath.replacingOccurrences(of: "ffmpeg", with: "ffprobe")
+        let ffprobePath = FFmpegLocator.ffprobePath(forFFmpegAt: ffmpegPath)
         let cmd = [ffprobePath, "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", audioURL.path]
         do {
             let output = try await FFmpegProcessRunner.runCapturing(cmd, timeout: 30)

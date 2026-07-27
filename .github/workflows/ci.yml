@@ -23,13 +23,30 @@ jobs:
       - name: Log Swift version
         run: swift --version
 
+      # No `restore-keys` fallback on purpose. A prefix fallback restores a
+      # .build produced by a *different* dependency set (and possibly a
+      # different Xcode, since `latest-stable` floats), which surfaces as
+      # confusing stale-artifact failures rather than an honest cache miss.
+      # A dependency bump should pay for a clean rebuild.
       - name: Cache SPM dependencies
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift') }}
+
+      # Fail rather than silently rewriting Package.resolved: a lockfile that
+      # disagrees with Package.swift means the committed versions are not the
+      # ones being tested.
+      - name: Verify Package.resolved is up to date
+        run: |
+          cp Package.resolved Package.resolved.ci-check
+          swift package resolve
+          if ! diff -q Package.resolved Package.resolved.ci-check >/dev/null; then
+            echo "::error::Package.resolved is out of date with Package.swift — run 'swift package resolve' and commit the result."
+            diff Package.resolved.ci-check Package.resolved || true
+            exit 1
+          fi
+          rm Package.resolved.ci-check
 
       # vendor/ is gitignored — Package.swift references binary targets at
       # vendor/sherpa-onnx.xcframework + vendor/onnxruntime.xcframework, so

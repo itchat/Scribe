@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Entitlements for the hardened runtime.
+
+      The app is deliberately NOT sandboxed: it shells out to bundled ffmpeg
+      and ffprobe binaries and writes output next to the user's source video,
+      neither of which a sandboxed app can do without a redesign around
+      security-scoped bookmarks.
+
+      Each entitlement below exists for a specific reason. Removing one should
+      be tested against the feature named in its comment.
+    -->
+
+    <!-- MLX compiles Metal kernels at runtime for the Qwen3-ASR engines. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- MLX's runtime kernel generation writes executable pages that are not
+         covered by our signature. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- ffmpeg is bundled with dylibbundler-rewritten Homebrew dylibs, and
+         the ONNX Runtime / CoreML stacks dlopen libraries at runtime. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- ScreenCaptureKit system-audio capture for Live Captions. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

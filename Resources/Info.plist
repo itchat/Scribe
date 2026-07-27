@@ -24,8 +24,10 @@
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.video</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Scribe does not use the microphone directly.</string>
+    <!-- NSMicrophoneUsageDescription is deliberately absent: the app captures
+         system audio via ScreenCaptureKit and never opens an input device. A
+         purpose string reading "we don't use this" prompted users for a
+         permission the app doesn't want. -->
     <key>NSScreenCaptureUsageDescription</key>
     <string>Scribe captures system audio to generate live captions of what you hear.</string>
     <key>CFBundleDocumentTypes</key>
@@ -45,10 +47,10 @@
             </array>
         </dict>
     </array>
-    <key>LSEnvironment</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    </dict>
+    <!-- LSEnvironment/PATH removed. Nothing in the app resolves a binary by
+         PATH — ffmpeg comes from Constants.ffmpegPaths or the bundle, and tar
+         is an absolute path — so it did no work, while placing the
+         group-writable /opt/homebrew/bin ahead of the system directories in
+         the app's environment. -->
 </dict>
 </plist>

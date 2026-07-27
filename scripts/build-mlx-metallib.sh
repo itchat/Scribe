@@ -50,6 +50,23 @@ if ! xcrun -sdk macosx --find metal >/dev/null 2>&1; then
     exit 1
 fi
 
+# `--find metal` only proves the *driver* exists. On Xcode 16.3+ the actual
+# compiler ships as a separately-downloaded "Metal Toolchain" component, and
+# without it every compile fails with "cannot execute tool 'metal'" — long
+# after this preflight has already reported success. Compile a trivial
+# shader so the failure surfaces here, with the command that fixes it.
+if ! echo 'kernel void _probe() {}' \
+    | xcrun -sdk macosx metal -x metal -c - -o /dev/null >/dev/null 2>&1; then
+    echo "" >&2
+    echo "ERROR: the Metal compiler is present but cannot run." >&2
+    echo "       Xcode 16.3+ splits the shader compiler into a separately" >&2
+    echo "       downloaded component that is not installed on this host." >&2
+    echo "" >&2
+    echo "       Fix:" >&2
+    echo "         xcodebuild -downloadComponent MetalToolchain" >&2
+    exit 1
+fi
+
 # ─── Kernel list ─────────────────────────────────────────────────────
 # Kernels that must be AOT-compiled into mlx.metallib.
 # Path is relative to $KERNELS_DIR; suffix is implied to be ".metal".

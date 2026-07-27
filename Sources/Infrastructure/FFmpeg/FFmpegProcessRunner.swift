@@ -12,8 +12,15 @@ enum FFmpegProcessRunner {
 
     /// Run FFmpeg and throw on non-zero exit. Enforces timeout and captures stderr.
     static func run(_ arguments: [String], timeout: TimeInterval) async throws {
-        logger.info("CMD: \(arguments.joined(separator: " "), privacy: .public)")
-        print("[FFmpeg] CMD: \(arguments.joined(separator: " "))")
+        // The argv contains every input and output path. Video filenames are
+        // unusually revealing — employer, client, medical or legal context —
+        // and the unified log is persisted and collected in sysdiagnose. Log
+        // the shape publicly and the contents privately, so a bug report is
+        // still diagnosable on the user's own machine without publishing
+        // their filenames to anyone who runs `log show`.
+        logger.info(
+            "CMD: \(arguments.count, privacy: .public) args: \(arguments.joined(separator: " "), privacy: .private)"
+        )
 
         let (exitCode, stderr) = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Int32, String), any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -68,7 +75,9 @@ enum FFmpegProcessRunner {
 
         if exitCode != 0 {
             let msg = String(stderr.suffix(500))
-            logger.error("failed (\(exitCode)): \(msg, privacy: .public)")
+            // ffmpeg's stderr echoes the input and output paths back, so it
+            // carries the same filename exposure as the argv above.
+            logger.error("failed (\(exitCode, privacy: .public)): \(msg, privacy: .private)")
             throw ScribeError.audioExtractionFailed(
                 underlying: NSError(domain: "FFmpeg", code: Int(exitCode), userInfo: [
                     NSLocalizedDescriptionKey: msg.isEmpty ? "FFmpeg exit code \(exitCode)" : msg

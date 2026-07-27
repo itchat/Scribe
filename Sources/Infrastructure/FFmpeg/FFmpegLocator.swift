@@ -29,6 +29,23 @@ public enum FFmpegLocator {
         FileManager.default.isExecutableFile(atPath: path)
     }
 
+    /// The `ffprobe` binary that sits alongside a given `ffmpeg`.
+    ///
+    /// Must be a path operation, not a string substitution. The previous
+    /// `replacingOccurrences(of: "ffmpeg", with: "ffprobe")` rewrote *every*
+    /// occurrence, so Homebrew's `ffmpeg-full` layout — the first candidate
+    /// in `Constants.ffmpegPaths`, and therefore the one actually selected
+    /// on a typical dev machine — became
+    /// `/opt/homebrew/opt/ffprobe-full/bin/ffprobe`, a path that does not
+    /// exist. `build-app.sh` already derived it correctly with `dirname`;
+    /// this brings the Swift side in line.
+    public static func ffprobePath(forFFmpegAt ffmpegPath: String) -> String {
+        URL(filePath: ffmpegPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("ffprobe")
+            .path
+    }
+
     /// Check whether VideoToolbox hardware acceleration is supported.
     public static func checkHardwareAcceleration(ffmpegPath: String) -> Bool {
         let process = Process()
