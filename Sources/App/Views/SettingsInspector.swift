@@ -22,9 +22,11 @@ struct SettingsInspector: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        // Refresh the inspector's own editing state when a reset happens.
+        // Persistence is `ConfigService`'s job — it subscribes too, so the
+        // reset still applies when this view isn't on screen.
         .onReceive(NotificationCenter.default.publisher(for: .resetSettings)) { _ in
             vm = SettingsViewModel(config: AppConfig())
-            autoSave()
         }
     }
 

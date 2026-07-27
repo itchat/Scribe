@@ -108,7 +108,16 @@ public final class OpenAITranslator: SubtitleTranslating, @unchecked Sendable {
     private func makeAPIRequest(bodyData: Data) async throws -> [String: Any] {
         // Support base URLs with or without trailing /v1
         let base = baseURL.hasSuffix("/v1") ? baseURL : "\(baseURL)/v1"
-        let url = URL(string: "\(base)/chat/completions")!
+        // `baseURL` is a free-text Settings field that auto-saves on every
+        // keystroke, so a stray space or control character used to reach a
+        // force-unwrapped `URL(string:)` and crash the app — persistently,
+        // since the bad value was already on disk by then.
+        guard let url = URL(string: "\(base)/chat/completions"), url.host != nil else {
+            throw ScribeError.invalidConfig(
+                field: "Base URL",
+                reason: "\"\(baseURL)\" is not a valid URL"
+            )
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

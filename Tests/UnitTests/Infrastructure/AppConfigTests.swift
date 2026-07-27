@@ -3,6 +3,29 @@ import Foundation
 @testable import Domain
 @testable import Infrastructure
 
+/// In-memory `SecretStoring` so config tests never touch the real login
+/// Keychain. Without this they do — an earlier run of this suite left a test
+/// API key in the developer's keychain and the next run read it back,
+/// producing a failure that had nothing to do with the code under test.
+final class InMemorySecretStore: SecretStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var key: String?
+
+    init(initial: String? = nil) { key = initial }
+
+    func readAPIKey() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return key
+    }
+
+    @discardableResult
+    func writeAPIKey(_ newKey: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        key = newKey.isEmpty ? nil : newKey
+        return true
+    }
+}
+
 @Suite("AppConfig")
 struct AppConfigTests {
 
@@ -18,7 +41,7 @@ struct AppConfigTests {
         #expect(config.subtitleStyle == SubtitleStyle())
     }
 
-    @Test("Codable round-trip preserves all fields")
+    @Test("Codable round-trip preserves all fields except the secret")
     func codableRoundTrip() throws {
         var config = AppConfig()
         config.apiKey = "test-key-123"
@@ -29,7 +52,12 @@ struct AppConfigTests {
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(AppConfig.self, from: data)
 
-        #expect(decoded.apiKey == "test-key-123")
+        // The API key is deliberately absent from the encoded form — it lives
+        // in the Keychain, not in a 0644 JSON file.
+        #expect(decoded.apiKey.isEmpty)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("test-key-123"), "the API key must never be serialised to disk")
+
         #expect(decoded.model == "gpt-4o")
         #expect(decoded.translationMode == .off)
         #expect(decoded.maxCharsPerBatch == 2000)
@@ -42,21 +70,80 @@ struct AppConfigTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let filePath = tempDir.appendingPathComponent("config.json")
+        let secrets = InMemorySecretStore()
 
         var original = AppConfig()
         original.apiKey = "my-secret-key"
         original.skipSubtitleBurning = true
-        try original.save(to: filePath)
+        try original.save(to: filePath, secrets: secrets)
 
-        let loaded = try AppConfig.load(from: filePath)
+        let loaded = try AppConfig.load(from: filePath, secrets: secrets)
         #expect(loaded.apiKey == "my-secret-key")
         #expect(loaded.skipSubtitleBurning == true)
+    }
+
+    @Test("Config file is written owner-readable only")
+    func configFileIsPrivate() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let filePath = tempDir.appendingPathComponent("config.json")
+        try AppConfig().save(to: filePath, secrets: InMemorySecretStore())
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: filePath.path)
+        let perms = try #require(attrs[.posixPermissions] as? NSNumber)
+        #expect(perms.int16Value == 0o600, "config.json must not be group/world readable")
+    }
+
+    /// Upgrade path: a config written before the key moved to the Keychain
+    /// still has it in plaintext. Loading must adopt it, store it, and strip
+    /// it from the file.
+    @Test("Migrates a legacy plaintext API key out of the config file")
+    func migratesLegacyPlaintextKey() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let filePath = tempDir.appendingPathComponent("config.json")
+        let legacyJSON = """
+        {
+          "apiKey" : "sk-legacy-plaintext",
+          "baseURL" : "https://api.openai.com",
+          "model" : "gpt-4o"
+        }
+        """
+        try legacyJSON.write(to: filePath, atomically: true, encoding: .utf8)
+
+        let secrets = InMemorySecretStore()
+        let loaded = try AppConfig.load(from: filePath, secrets: secrets)
+
+        #expect(loaded.apiKey == "sk-legacy-plaintext", "the existing key must not be lost on upgrade")
+        #expect(secrets.readAPIKey() == "sk-legacy-plaintext", "the key must be moved into the secret store")
+
+        let rewritten = try String(contentsOf: filePath, encoding: .utf8)
+        #expect(!rewritten.contains("sk-legacy-plaintext"), "the plaintext key must be stripped from disk")
+    }
+
+    /// The secret store wins once migration has happened.
+    @Test("Prefers the stored key over anything left in the file")
+    func storedKeyWins() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let filePath = tempDir.appendingPathComponent("config.json")
+        try #"{ "apiKey" : "stale-from-file" }"#.write(to: filePath, atomically: true, encoding: .utf8)
+
+        let secrets = InMemorySecretStore(initial: "current-from-keychain")
+        let loaded = try AppConfig.load(from: filePath, secrets: secrets)
+        #expect(loaded.apiKey == "current-from-keychain")
     }
 
     @Test("Load returns default config when file is missing")
     func loadMissingFile() throws {
         let bogusPath = URL(filePath: "/tmp/nonexistent_\(UUID().uuidString).json")
-        let config = (try? AppConfig.load(from: bogusPath)) ?? AppConfig()
+        let config = (try? AppConfig.load(from: bogusPath, secrets: InMemorySecretStore())) ?? AppConfig()
         #expect(config.apiKey.isEmpty)
         #expect(config.baseURL == Constants.defaultOpenAIBaseURL)
     }
@@ -76,6 +163,29 @@ struct AppConfigTests {
         config.apiKey = ""
         let issues = config.validate(for: .google)
         #expect(issues.isEmpty)
+    }
+
+    /// `baseURL` is a free-text field that auto-saves on every keystroke and
+    /// used to reach a force-unwrapped `URL(string:)` in `OpenAITranslator`,
+    /// crashing the app on a value that was already persisted to disk.
+    @Test("Rejects malformed base URLs",
+          arguments: ["not a url", "", "   ", "http://", "ht tp://x.test"])
+    func rejectsMalformedBaseURL(bad: String) {
+        var config = AppConfig()
+        config.apiKey = "sk-test"
+        config.baseURL = bad
+        let issues = config.validate(for: .openAI)
+        #expect(!issues.isEmpty, "\"\(bad)\" should be rejected")
+        #expect(issues.contains { $0.contains("Base URL") })
+    }
+
+    @Test("Accepts well-formed base URLs with and without /v1",
+          arguments: ["https://api.openai.com", "https://api.openai.com/v1", "http://localhost:1234"])
+    func acceptsValidBaseURL(good: String) {
+        var config = AppConfig()
+        config.apiKey = "sk-test"
+        config.baseURL = good
+        #expect(config.validate(for: .openAI).isEmpty, "\"\(good)\" should be accepted")
     }
 
     // MARK: - Backward compat for old translation fields
@@ -194,6 +304,7 @@ struct AppConfigTests {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let filePath = tempDir.appendingPathComponent("config.json")
+        let secrets = InMemorySecretStore()
 
         var edited = AppConfig()
         edited.baseURL = "https://custom.openai.proxy/v1"
@@ -218,8 +329,8 @@ struct AppConfigTests {
             marginHorizontal: 80
         )
 
-        try edited.save(to: filePath)
-        let reloaded = try AppConfig.load(from: filePath)
+        try edited.save(to: filePath, secrets: secrets)
+        let reloaded = try AppConfig.load(from: filePath, secrets: secrets)
 
         #expect(reloaded.baseURL == "https://custom.openai.proxy/v1")
         #expect(reloaded.apiKey == "sk-rt-1234567890")
@@ -249,24 +360,25 @@ struct AppConfigTests {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let filePath = tempDir.appendingPathComponent("config.json")
+        let secrets = InMemorySecretStore()
 
         // Edit 1: baseURL
         var step = AppConfig()
         step.baseURL = "https://step1.example/v1"
-        try step.save(to: filePath)
+        try step.save(to: filePath, secrets: secrets)
 
         // Edit 2: load, mutate apiKey, save
-        step = try AppConfig.load(from: filePath)
+        step = try AppConfig.load(from: filePath, secrets: secrets)
         step.apiKey = "sk-step2-secret"
-        try step.save(to: filePath)
+        try step.save(to: filePath, secrets: secrets)
 
         // Edit 3: load, mutate model + maxCharsPerBatch, save
-        step = try AppConfig.load(from: filePath)
+        step = try AppConfig.load(from: filePath, secrets: secrets)
         step.model = "gpt-step3"
         step.maxCharsPerBatch = 9999
-        try step.save(to: filePath)
+        try step.save(to: filePath, secrets: secrets)
 
-        let final = try AppConfig.load(from: filePath)
+        let final = try AppConfig.load(from: filePath, secrets: secrets)
         #expect(final.baseURL == "https://step1.example/v1", "step 1 edit lost")
         #expect(final.apiKey == "sk-step2-secret", "step 2 edit lost")
         #expect(final.model == "gpt-step3", "step 3 model edit lost")

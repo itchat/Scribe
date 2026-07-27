@@ -15,7 +15,7 @@ BUILD_DIR="$PROJECT_DIR/.build/release"
 APP_NAME="Scribe"
 APP_BUNDLE="$PROJECT_DIR/dist/$APP_NAME.app"
 DMG_PATH="$PROJECT_DIR/dist/$APP_NAME.dmg"
-VERSION="2.2.0"
+VERSION="2.3.0"
 
 MAKE_DMG=false
 CLEAN=false
@@ -123,8 +123,16 @@ mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 # Copy binary
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy Info.plist
+# Copy Info.plist, then stamp the version from $VERSION above so the bundle
+# can't drift from the build script. Previously both files carried a
+# hand-maintained number and they disagreed — the script said 2.2.0 while
+# every shipped bundle reported 2.0.0.
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+    "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" \
+    "$APP_BUNDLE/Contents/Info.plist"
+echo "  Stamped bundle version $VERSION"
 
 # Create PkgInfo
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
@@ -219,19 +227,78 @@ echo "  App bundle: $APP_BUNDLE ($APP_SIZE)"
 # Otherwise fall back to ad-hoc, which works but forces re-granting
 # permissions every time the binary changes.
 SIGN_IDENTITY="Scribe Local Signer"
+ENTITLEMENTS="$PROJECT_DIR/Resources/Scribe.entitlements"
+
+# Hardened runtime is opt-in via HARDENED=true until it has been verified on
+# a machine with the Metal toolchain installed. It interacts with three things
+# this app depends on — MLX's runtime Metal kernel compilation, the ~60
+# dylibbundler-rewritten Homebrew dylibs, and the bundled ffmpeg subprocess —
+# and each failure mode appears only at runtime, not at build time.
+# Resources/Scribe.entitlements carries the entitlements those need.
+HARDENED="${HARDENED:-false}"
+
+# Sign nested code explicitly, innermost first, instead of using `--deep`.
+# Apple deprecated `--deep`, and it is unreliable for a bundle like this one
+# (helper executables in Contents/MacOS plus dozens of dylibs in
+# Contents/Frameworks) because it signs outside-in.
+sign_bundle() {
+    local identity="$1"
+    local -a flags=(--force --timestamp=none)
+    if [ "$HARDENED" = true ]; then
+        flags+=(--options runtime --entitlements "$ENTITLEMENTS")
+    fi
+
+    # Collect every nested code object, then sign inside-out.
+    #
+    # This must cover *everything* Contents/ holds, not just dylibs: the main
+    # executable's own directory also carries ffmpeg, ffprobe and mlx.metallib,
+    # and codesign treats the metallib as a code object too. Missing one
+    # produces "code object is not signed at all" only at verification time,
+    # which is why the `--verify --strict` gate below exists.
+    local -a nested=()
+    while IFS= read -r item; do
+        nested+=("$item")
+    done < <(
+        find "$APP_BUNDLE/Contents/Frameworks" -type f \
+            \( -name "*.dylib" -o -name "*.so" \) 2>/dev/null
+        # Everything beside the main binary in MacOS/.
+        find "$APP_BUNDLE/Contents/MacOS" -type f ! -name "$APP_NAME" 2>/dev/null
+    )
+
+    local item
+    for item in "${nested[@]}"; do
+        if ! codesign "${flags[@]}" --sign "$identity" "$item" 2>&1; then
+            echo "  ✗ failed to sign nested object: ${item#"$APP_BUNDLE/"}"
+            return 1
+        fi
+    done
+
+    # Finally the bundle itself.
+    codesign "${flags[@]}" --sign "$identity" --identifier com.scribe.app "$APP_BUNDLE"
+}
+
 echo ""
+if [ "$HARDENED" = true ]; then
+    echo "       Hardened runtime: ENABLED (HARDENED=true)"
+else
+    echo "       Hardened runtime: disabled (set HARDENED=true to enable, then verify Qwen3 + burn still work)"
+fi
+
 if security find-identity -v -p codesigning 2>/dev/null | grep -F -q "\"$SIGN_IDENTITY\""; then
     echo "[5/6] Code signing with stable identity: $SIGN_IDENTITY"
-    codesign --force --deep --sign "$SIGN_IDENTITY" \
-        --identifier com.scribe.app \
-        "$APP_BUNDLE" 2>/dev/null || {
-            echo "  ⚠ stable signing failed — falling back to ad-hoc"
-            codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true
-        }
+    sign_bundle "$SIGN_IDENTITY" || {
+        echo "  ⚠ stable signing failed — falling back to ad-hoc"
+        sign_bundle - || true
+    }
 else
     echo "[5/6] Ad-hoc signing (no stable identity found — TCC perms will reset every rebuild)"
     echo "       Tip: run ./scripts/setup-signing-cert.sh once to fix this."
-    codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || echo "  codesign not available, skipping"
+    sign_bundle - || echo "  codesign not available, skipping"
+fi
+
+# Fail loudly rather than shipping a bundle that Gatekeeper will reject.
+if ! codesign --verify --strict "$APP_BUNDLE" 2>/dev/null; then
+    echo "  ⚠ codesign --verify --strict failed on the finished bundle"
 fi
 
 # ─── Step 6: Create DMG (optional) ───────────────────────────────────
