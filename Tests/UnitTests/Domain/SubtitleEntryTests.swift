@@ -35,6 +35,27 @@ struct SubtitleEntryTests {
         #expect(entry.bilingualText == "Hello")
     }
 
+    @Test("bilingual text drops a translation identical to the original")
+    func bilingualTextSameLanguage() {
+        let ts = SubtitleTimestamp(start: 1.0, end: 2.0)
+        let entry = SubtitleEntry(id: 1, timestamp: ts, text: "呃，问律师的时候呢？", translatedText: "呃，问律师的时候呢？")
+        #expect(entry.bilingualText == "呃，问律师的时候呢？")
+    }
+
+    @Test("bilingual text treats punctuation-only differences as identical")
+    func bilingualTextPunctuationOnlyDifference() {
+        let ts = SubtitleTimestamp(start: 1.0, end: 2.0)
+        let entry = SubtitleEntry(id: 1, timestamp: ts, text: "问律师的时候呢？", translatedText: " 问律师的时候呢? ")
+        #expect(entry.bilingualText == "问律师的时候呢？")
+    }
+
+    @Test("bilingual text ignores an empty translation")
+    func bilingualTextEmptyTranslation() {
+        let ts = SubtitleTimestamp(start: 1.0, end: 2.0)
+        let entry = SubtitleEntry(id: 1, timestamp: ts, text: "Hello", translatedText: "  ")
+        #expect(entry.bilingualText == "Hello")
+    }
+
     @Test("Entries with same values are equal")
     func equality() {
         let ts = SubtitleTimestamp(start: 1.0, end: 2.0)
