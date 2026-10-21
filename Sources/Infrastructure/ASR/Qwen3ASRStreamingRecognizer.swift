@@ -185,8 +185,7 @@ public actor Qwen3ASRStreamingRecognizer: StreamingTranscribing {
             // process-global setting, so on an 8 GB M1 a fixed 512 MB is ~7%
             // of all memory held purely as reclaimable scratch, competing
             // with the weights it is supposed to be serving.
-            MLX.Memory.cacheLimit = MemoryBudget.mlxCacheLimitBytes
-            MemoryBudget.logSummary()
+            MLXMemoryPolicy.apply()
         }
 
         // Always fresh-arm the per-session pieces — even when models stay

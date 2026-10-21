@@ -230,6 +230,19 @@ public struct AppConfig: Codable, Sendable {
         return config
     }
 
+    // MARK: - Derived settings
+
+    /// The batching and retry settings, in the shape translators take.
+    public var translationTuning: TranslationTuning {
+        TranslationTuning(
+            maxCharsPerBatch: maxCharsPerBatch,
+            maxEntriesPerBatch: maxEntriesPerBatch,
+            maxRetries: maxRetries,
+            retryBaseDelay: retryBaseDelay,
+            retryMaxDelay: retryMaxDelay
+        )
+    }
+
     // MARK: - Validation
 
     /// Validate configuration for the active translation mode. Returns an

@@ -78,10 +78,11 @@ final class LiveCaptionsViewModel {
 
     init(
         source: any LiveAudioSource = SystemAudioCapture(),
-        configService: ConfigService = ConfigService()
+        configService: ConfigService
     ) {
-        // Persisted engine choice survives across app launches.
-        configService.load()
+        // Persisted engine choice survives across app launches. The service
+        // is the app-wide instance, already loaded and kept current by every
+        // other editor — no reload here.
         let initialEngine = configService.config.liveCaptionEngine
         self.source = source
         self.engine = initialEngine
@@ -112,9 +113,9 @@ final class LiveCaptionsViewModel {
         engine = newEngine
 
         // Persist immediately so the next launch reopens with this engine.
-        var cfg = configService.config
-        cfg.liveCaptionEngine = newEngine
-        configService.update(cfg)
+        // `mutate`, not `update` with a copy: this window owns only the
+        // engine field and must not write back anything else it read.
+        configService.mutate { $0.liveCaptionEngine = newEngine }
 
         Task {
             // Tear down for every state that can own a live engine, not just

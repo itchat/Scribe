@@ -132,14 +132,22 @@ let package = Package(
             name: "InfrastructureTests",
             dependencies: [
                 "Infrastructure", "Domain", "Protocols",
-                // For WordGroupingChunkerTests — we need AlignedWord (in
-                // AudioCommon, transitively re-exported by Qwen3ASR).
+                // AudioCommon has no product of its own; Qwen3ASR brings it.
                 .product(name: "Qwen3ASR", package: "speech-swift"),
                 // For Qwen3SegmentPlannerTests — VADEvent / SpeechSegment
                 // live in SpeechVAD and AudioCommon respectively.
                 .product(name: "SpeechVAD", package: "speech-swift"),
             ],
             path: "Tests/UnitTests/Infrastructure"
+        ),
+        // App-layer view models and services. Testing an executable target
+        // works because SwiftPM renames its entry point for test builds.
+        .testTarget(
+            name: "AppTests",
+            dependencies: [
+                "App", "Domain", "Infrastructure",
+            ],
+            path: "Tests/UnitTests/App"
         ),
         .testTarget(
             name: "IntegrationTests",

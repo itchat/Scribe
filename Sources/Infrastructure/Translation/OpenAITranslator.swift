@@ -11,6 +11,7 @@ public final class OpenAITranslator: SubtitleTranslating, @unchecked Sendable {
     private let baseURL: String
     private let model: String
     private let systemPrompt: String
+    private let tuning: TranslationTuning
     private let session: URLSession
     private let logger = Logger(subsystem: "com.scribe", category: "translation.openai")
 
@@ -21,16 +22,24 @@ public final class OpenAITranslator: SubtitleTranslating, @unchecked Sendable {
         apiKey: String,
         baseURL: String = Constants.defaultOpenAIBaseURL,
         model: String = Constants.defaultOpenAIModel,
-        systemPrompt: String = Constants.defaultTranslationPrompt
+        systemPrompt: String = Constants.defaultTranslationPrompt,
+        tuning: TranslationTuning = .default,
+        session: URLSession? = nil
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.model = model
         self.systemPrompt = systemPrompt
+        self.tuning = tuning
 
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = Constants.apiTimeoutSeconds
-        self.session = URLSession(configuration: config)
+        if let session {
+            // Injected by tests to stub the network.
+            self.session = session
+        } else {
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = Constants.apiTimeoutSeconds
+            self.session = URLSession(configuration: config)
+        }
     }
 
     // MARK: - SubtitleTranslating
@@ -48,7 +57,11 @@ public final class OpenAITranslator: SubtitleTranslating, @unchecked Sendable {
             )
         }
 
-        let batches = BatchSplitter.split(entries)
+        let batches = BatchSplitter.split(
+            entries,
+            maxChars: tuning.maxCharsPerBatch,
+            maxEntries: tuning.maxEntriesPerBatch
+        )
         var allTranslated: [SubtitleEntry] = []
 
         // Let errors propagate so FallbackTranslator can switch engines
@@ -76,9 +89,9 @@ public final class OpenAITranslator: SubtitleTranslating, @unchecked Sendable {
 
         // Return extracted String content (Sendable) from retry block, not raw JSON
         let content: String = try await RetryExecutor.execute(
-            maxAttempts: 4,
-            baseDelay: 1.0,
-            maxDelay: 60.0
+            maxAttempts: tuning.maxAttempts,
+            baseDelay: tuning.retryBaseDelay,
+            maxDelay: tuning.retryMaxDelay
         ) { [self] in
             let json = try await makeAPIRequest(bodyData: bodyData)
             return try OpenAIResponseParser.extractContent(from: json)

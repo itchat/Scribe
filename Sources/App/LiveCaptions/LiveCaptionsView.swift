@@ -6,7 +6,7 @@ import Infrastructure
 /// Live Captions window. Big rolling caption text at the bottom, history above,
 /// engine picker + Start/Stop button in the toolbar.
 struct LiveCaptionsView: View {
-    @State private var vm = LiveCaptionsViewModel()
+    @State private var vm: LiveCaptionsViewModel
 
     // ── Selection-popup translation state ──
     /// The currently selected substring inside the transcript pane.
@@ -33,6 +33,10 @@ struct LiveCaptionsView: View {
     @State private var selectionDebounceID = UUID()
 
     private let googleFallback = InstantTranslator()
+
+    init(configService: ConfigService) {
+        _vm = State(initialValue: LiveCaptionsViewModel(configService: configService))
+    }
 
     var body: some View {
         VStack(spacing: 0) {

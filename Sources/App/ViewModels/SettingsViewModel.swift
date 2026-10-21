@@ -3,6 +3,9 @@ import Domain
 import Infrastructure
 
 /// View model for the settings sheet.
+///
+/// SRP: holds the editing state for the fields the Settings inspector owns,
+/// and writes back only those fields — see `apply(to:)`.
 @Observable
 @MainActor
 final class SettingsViewModel {
@@ -15,9 +18,6 @@ final class SettingsViewModel {
     var maxEntriesPerBatch: Int
     var skipSubtitleBurning: Bool
     var enableGoogleFallback: Bool
-    /// Captured so saving Settings doesn't reset Live Captions / offline ASR
-    /// engine choices that the user picked from their respective UIs.
-    var liveCaptionEngine: LiveCaptionEngine
     var offlineASREngine: OfflineASREngine
     var subtitleStyle: SubtitleStyle
 
@@ -31,25 +31,30 @@ final class SettingsViewModel {
         self.maxEntriesPerBatch = config.maxEntriesPerBatch
         self.skipSubtitleBurning = config.skipSubtitleBurning
         self.enableGoogleFallback = config.enableGoogleFallback
-        self.liveCaptionEngine = config.liveCaptionEngine
         self.offlineASREngine = config.offlineASREngine
         self.subtitleStyle = config.subtitleStyle
     }
 
-    func toConfig() -> AppConfig {
-        AppConfig(
-            baseURL: baseURL,
-            apiKey: apiKey,
-            model: model,
-            customPrompt: customPrompt,
-            maxCharsPerBatch: maxCharsPerBatch,
-            maxEntriesPerBatch: maxEntriesPerBatch,
-            enableGoogleFallback: enableGoogleFallback,
-            skipSubtitleBurning: skipSubtitleBurning,
-            translationMode: translationMode,
-            subtitleStyle: subtitleStyle,
-            liveCaptionEngine: liveCaptionEngine,
-            offlineASREngine: offlineASREngine
-        )
+    /// Write the inspector's fields into `config`, leaving every other field
+    /// as it is.
+    ///
+    /// This used to build a fresh `AppConfig` from the snapshot taken when the
+    /// inspector opened. Fields the inspector doesn't edit were therefore
+    /// written back at their old values: switching the Live Captions engine
+    /// while the inspector was open was undone by the next keystroke here, and
+    /// the retry settings, which have no control at all, were reset to their
+    /// defaults on every save.
+    func apply(to config: inout AppConfig) {
+        config.baseURL = baseURL
+        config.apiKey = apiKey
+        config.model = model
+        config.customPrompt = customPrompt
+        config.maxCharsPerBatch = maxCharsPerBatch
+        config.maxEntriesPerBatch = maxEntriesPerBatch
+        config.enableGoogleFallback = enableGoogleFallback
+        config.skipSubtitleBurning = skipSubtitleBurning
+        config.translationMode = translationMode
+        config.subtitleStyle = subtitleStyle
+        config.offlineASREngine = offlineASREngine
     }
 }

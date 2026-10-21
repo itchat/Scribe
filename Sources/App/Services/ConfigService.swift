@@ -6,10 +6,19 @@ import Infrastructure
 /// Handles app configuration persistence.
 ///
 /// SRP: Only loads, stores, and persists `AppConfig`.
+/// DIP: persistence goes through `ConfigStoring`, so tests run against an
+/// in-memory store instead of the user's real file and Keychain.
+///
+/// There must be exactly one instance per process — `ScribeApp` creates it
+/// and hands it to every window. Each window used to build its own, and
+/// because `update` writes the *whole* config, whichever window saved last
+/// replaced the other's changes with its stale snapshot, API key included.
 @Observable
 @MainActor
 final class ConfigService {
     private(set) var config: AppConfig
+
+    private let store: any ConfigStoring
 
     /// Token for the `.resetSettings` subscription, released in `deinit`.
     ///
@@ -21,17 +30,13 @@ final class ConfigService {
     /// properties — the suggestion comes from the `@Observable` expansion.)
     private nonisolated(unsafe) var resetObserver: (any NSObjectProtocol)?
 
-    /// Initialise from disk by default so callers that read `config`
+    /// Initialise from the store so callers that read `config`
     /// synchronously at construction time (e.g. SwiftUI views creating
     /// `@State` objects in their body) see the user's persisted values
-    /// instead of factory defaults. Pass an explicit `config:` for tests
-    /// or DI scenarios that should bypass disk.
-    init(config: AppConfig? = nil) {
-        if let config {
-            self.config = config
-        } else {
-            self.config = (try? AppConfig.load()) ?? AppConfig()
-        }
+    /// instead of factory defaults.
+    init(store: any ConfigStoring = FileConfigStore()) {
+        self.store = store
+        self.config = (try? store.load()) ?? AppConfig()
 
         // "Reset Settings to Defaults…" posts `.resetSettings` from the app
         // menu. Its only subscriber used to be `SettingsInspector`, a view
@@ -61,16 +66,30 @@ final class ConfigService {
         update(AppConfig())
     }
 
-    /// Re-read from disk. Mostly redundant after `init` but kept for
-    /// callers that want to refresh after an external edit.
+    /// Re-read from the store, for callers that want to pick up an
+    /// external edit.
     func load() {
-        if let loaded = try? AppConfig.load() {
+        if let loaded = try? store.load() {
             self.config = loaded
         }
     }
 
+    /// Change only the fields `change` touches, starting from the current
+    /// config, and persist the result.
+    ///
+    /// Prefer this over `update(_:)` from any editor that owns a subset of
+    /// the settings. Building a full `AppConfig` from a copy taken earlier
+    /// writes every field the editor doesn't own back at its old value.
+    func mutate(_ change: (inout AppConfig) -> Void) {
+        var next = config
+        change(&next)
+        update(next)
+    }
+
+    /// Replace the whole config. Only for callers that really mean every
+    /// field, such as a reset.
     func update(_ newConfig: AppConfig) {
         self.config = newConfig
-        try? newConfig.save()
+        try? store.save(newConfig)
     }
 }

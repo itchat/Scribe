@@ -1,5 +1,6 @@
 import Foundation
 import Domain
+import os
 
 /// Locates the FFmpeg binary on the system.
 ///
@@ -46,8 +47,26 @@ public enum FFmpegLocator {
             .path
     }
 
+    /// Answers already computed, keyed by ffmpeg path.
+    private static let hardwareAccelCache = OSAllocatedUnfairLock<[String: Bool]>(initialState: [:])
+
     /// Check whether VideoToolbox hardware acceleration is supported.
+    ///
+    /// Cached per binary. Both the extractor and the composer ask in their
+    /// initialisers, and both are built for every queued video on the main
+    /// actor — so each video used to cost two synchronous `ffmpeg -version`
+    /// launches on the UI thread for an answer that cannot change while the
+    /// app runs.
     public static func checkHardwareAcceleration(ffmpegPath: String) -> Bool {
+        if let cached = hardwareAccelCache.withLock({ $0[ffmpegPath] }) {
+            return cached
+        }
+        let supported = probeHardwareAcceleration(ffmpegPath: ffmpegPath)
+        hardwareAccelCache.withLock { $0[ffmpegPath] = supported }
+        return supported
+    }
+
+    private static func probeHardwareAcceleration(ffmpegPath: String) -> Bool {
         let process = Process()
         process.executableURL = URL(filePath: ffmpegPath)
         process.arguments = ["-version"]

@@ -297,7 +297,7 @@ struct AppConfigTests {
 
     @Test("Every Settings-editable field round-trips through save/load on disk")
     func everyEditableFieldRoundTripsToDisk() throws {
-        // Mirrors what `SettingsViewModel.toConfig()` produces after the user
+        // Mirrors what `SettingsViewModel.apply(to:)` writes after the user
         // edits each field in `SettingsInspector`. If any of these regress,
         // the user's edits would silently disappear after relaunch.
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

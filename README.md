@@ -24,8 +24,7 @@ Drop a video in, pick an ASR engine, hit Start. The whole pipeline is local exce
 video.mp4  →  audio.wav  →  transcript     →  translated SRT  →  subtitled video
               (ffmpeg)      (Parakeet on ANE,  (OpenAI / Google   (ffmpeg + libass)
                             Qwen3 0.6B/1.7B    / off)
-                            on MLX with
-                            forced aligner)
+                            on MLX)
 ```
 
 Or open Live Captions (⌘⇧L) and talk: it captures system audio with ScreenCaptureKit and streams a transcript into a notepad-shaped window in real time.
@@ -87,7 +86,7 @@ User picks the engine in Settings; the pipeline injects the matching `SpeechReco
 - **Qwen3-ASR 0.6B (4-bit MLX)** — multilingual incl. zh/en code-switching. ~342 MB first-run download.
 - **Qwen3-ASR 1.7B (4-bit MLX)** — same coverage, higher accuracy, ~3× the runtime. ~700 MB first-run download.
 
-Both Qwen3 paths run on [soniqo/speech-swift](https://github.com/soniqo/speech-swift) (MLX-Swift). The companion **Qwen3-ForcedAligner-0.6B** model produces acoustic word-level timestamps so SRT cue boundaries land on real speech pauses; if alignment fails, the pipeline falls back to a char-weighted `SentenceChunker`.
+Both Qwen3 paths run on [soniqo/speech-swift](https://github.com/soniqo/speech-swift) (MLX-Swift). Silero VAD splits the audio at speech pauses, so each cue starts and ends on a real pause; within one utterance, `SentenceChunker` subdivides the text and weights cue time by character count.
 
 ### Live Captions (⌘⇧L)
 A separate window that captures system audio via **ScreenCaptureKit** and streams a transcript into a notepad-shaped scroll view in real time.
@@ -176,7 +175,7 @@ A few pieces I'm happy with:
 
 **Auto-save settings, all the way down.** The Inspector has no Apply button. Every control wires `.onChange` (not `.onSubmit`) so changes persist when focus moves away — not only on Enter. `ConfigService` loads from disk on `init` so SwiftUI views see persisted values on first body render.
 
-**Subtitle timing is acoustic when possible.** Qwen3 path runs the audio + transcript through `Qwen3ForcedAligner` to get word-level timestamps, then `WordGroupingChunker` groups words into reading-shaped cues at sentence terminators. When alignment is unavailable, `SentenceChunker` distributes time proportionally to chunk character count — the standard heuristic from `aeneas` / WhisperX.
+**Subtitle timing comes from VAD, not a forced aligner.** The Qwen3 path runs Silero VAD over the audio and transcribes each speech run on its own (force-split at 25 s), so cue boundaries sit on real pauses. Inside one run, `SentenceChunker` splits at sentence terminators and distributes time proportionally to chunk character count — the standard heuristic from `aeneas` / WhisperX. A forced aligner was tried and dropped: its word timestamps were not reliable enough to beat this.
 
 **Error handling is a single enum.** `ScribeError` has ~15 cases, each carrying just the data that case needs. One switch in the pipeline decides whether to retry, surface the error, or fail softly — no exception hierarchy, no `Any` casts.
 
@@ -184,7 +183,7 @@ A few pieces I'm happy with:
 
 - **SwiftUI** (macOS 15+) with Swift 6 concurrency (`async/await`, `actor`)
 - **[FluidAudio](https://github.com/FluidInference/FluidAudio)** — CoreML Parakeet + Nemotron streaming
-- **[soniqo/speech-swift](https://github.com/soniqo/speech-swift)** — MLX-Swift port of Qwen3-ASR + Qwen3-ForcedAligner
+- **[soniqo/speech-swift](https://github.com/soniqo/speech-swift)** — MLX-Swift port of Qwen3-ASR + Silero VAD
 - **[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)** — ONNX Runtime streaming Zipformer for zh-en
 - **[FFmpeg](https://ffmpeg.org/)** (subprocess, bundled) — audio + video
 - **[swift-testing](https://github.com/swiftlang/swift-testing)** — all 168 tests
