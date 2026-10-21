@@ -104,7 +104,7 @@ final class ProcessingViewModel {
     private let cacheDir: URL
 
     init(
-        configService: ConfigService = ConfigService(),
+        configService: ConfigService,
         modelService: ASRModelService = ASRModelService(),
         toastCenter: ToastCenter = ToastCenter(),
         notifier: SystemNotifier = SystemNotifier(),
@@ -122,7 +122,7 @@ final class ProcessingViewModel {
 
     var currentConfig: AppConfig { configService.config }
     func loadConfig() { configService.load() }
-    func updateConfig(_ c: AppConfig) { configService.update(c) }
+    func mutateConfig(_ change: (inout AppConfig) -> Void) { configService.mutate(change) }
 
     // MARK: - Model proxies
 
@@ -239,7 +239,13 @@ final class ProcessingViewModel {
             item.status = "Starting…"
             item.progress = 0
 
-            let reporter = ItemProgressReporter(item: item)
+            let reporter = CoalescingProgressReporter { progress, status in
+                // A delivery can still be queued when the pipeline returns;
+                // it must not overwrite the final "Completed" / "Failed".
+                guard item.state == .processing else { return }
+                if let progress { item.progress = progress }
+                if let status { item.status = status }
+            }
             let pipeline = createPipeline(for: item.url, progress: reporter)
             let result = await pipeline.process()
 
@@ -285,7 +291,8 @@ final class ProcessingViewModel {
                     apiKey: config.apiKey,
                     baseURL: config.baseURL,
                     model: config.model,
-                    systemPrompt: config.customPrompt
+                    systemPrompt: config.customPrompt,
+                    tuning: config.translationTuning
                 )
                 return config.enableGoogleFallback
                     ? FallbackTranslator(primary: openAI, fallback: GoogleTranslator())
@@ -339,23 +346,6 @@ final class ProcessingViewModel {
         case .qwen3_1_7B:
             return Qwen3OfflineRecognizer(size: .b1_7)
         }
-    }
-}
-
-// MARK: - Progress Bridge
-
-private final class ItemProgressReporter: Protocols.ProgressReporting, @unchecked Sendable {
-    private let item: VideoItem
-    init(item: VideoItem) { self.item = item }
-
-    nonisolated func reportProgress(_ percent: Int) {
-        let item = self.item
-        Task { @MainActor in item.progress = percent }
-    }
-
-    nonisolated func reportStatus(_ message: String) {
-        let item = self.item
-        Task { @MainActor in item.status = message }
     }
 }
 

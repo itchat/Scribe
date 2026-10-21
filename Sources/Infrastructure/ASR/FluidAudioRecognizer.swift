@@ -114,9 +114,10 @@ public actor FluidAudioRecognizer: SpeechRecognizing {
         let handler: ProgressHandler = { [weak progress] dlProgress in
             let percent = Int(dlProgress.fractionCompleted * 100)
             progress?.reportStatus("Downloading ASR model... \(percent)%")
-            // Map download progress to the 10-20% pipeline range
-            let mapped = 10 + Int(dlProgress.fractionCompleted * 10)
-            progress?.reportProgress(mapped)
+            // Progress is stage-local (0–100); the pipeline maps it onto its
+            // slice of the bar. The download fills the first sixth, the same
+            // share of the bar it had when this mapped to 10–20 itself.
+            progress?.reportProgress(Int(dlProgress.fractionCompleted * 16))
         }
 
         let loadedModels = try await AsrModels.downloadAndLoad(

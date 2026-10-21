@@ -4,9 +4,13 @@ import Domain
 
 /// Main application window with native toolbar and materials.
 struct ContentView: View {
-    @State private var viewModel = ProcessingViewModel()
+    @State private var viewModel: ProcessingViewModel
     @State private var selectedItemID: VideoItem.ID?
     @State private var isWindowDropTargeted = false
+
+    init(configService: ConfigService) {
+        _viewModel = State(initialValue: ProcessingViewModel(configService: configService))
+    }
 
     var body: some View {
         Group {
@@ -35,7 +39,7 @@ struct ContentView: View {
         .inspector(isPresented: $viewModel.showSettings) {
             SettingsInspector(
                 config: viewModel.currentConfig,
-                onSave: { viewModel.updateConfig($0) }
+                onSave: { viewModel.mutateConfig($0) }
             )
             .inspectorColumnWidth(min: 320, ideal: 380, max: 480)
         }

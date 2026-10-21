@@ -5,10 +5,12 @@ import UniformTypeIdentifiers
 struct ScribeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
+    /// The one `ConfigService` for the process, shared by both windows.
+    @State private var configService = ConfigService()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(configService: configService)
                 .background(WindowConfigurator())
         }
         .windowResizability(.contentMinSize)
@@ -59,7 +61,7 @@ struct ScribeApp: App {
         // only ever one live-captions session, so there should only ever be
         // one window.
         Window("Live Captions", id: "live-captions") {
-            LiveCaptionsView()
+            LiveCaptionsView(configService: configService)
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 720, height: 480)

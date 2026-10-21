@@ -7,6 +7,7 @@ import Protocols
 import Qwen3ASR
 import SpeechVAD
 import AudioCommon
+import Core
 
 /// Offline batch ASR powered by Qwen3-ASR (0.6B or 1.7B) running on Apple
 /// Silicon via MLX-Swift. Used by the burn pipeline to transcribe a video's
@@ -135,6 +136,10 @@ public actor Qwen3OfflineRecognizer: SpeechRecognizing {
             }
         )
         self.model = loaded
+        // The cache limit is process-global and was previously only set by
+        // Live Captions, so a burn run before Live Captions ever started
+        // ran unbounded. Apply it here too, now that MLX is initialised.
+        MLXMemoryPolicy.apply()
         logger.info("Qwen3-ASR \(label, privacy: .public) ready")
         return loaded
     }
@@ -166,6 +171,7 @@ public actor Qwen3OfflineRecognizer: SpeechRecognizing {
         var collected: [Domain.TranscriptionSegment] = []
         var transcribedSeconds: Float = 0
         var finalsSinceCacheFlush = 0
+        var throttle = ProgressThrottle()
 
         let chunkSize = SileroVADModel.chunkSize
         let totalSamples = samples.count
@@ -205,11 +211,16 @@ public actor Qwen3OfflineRecognizer: SpeechRecognizing {
                 transcribedSeconds = split.endTime
             }
 
-            // Progress: percent of audio seconds processed. Refresh every
-            // ~5 s of audio to keep the status bar from thrashing.
-            if duration > 0 {
-                let pct = Int((Double(processor.currentTime) / duration) * 100.0)
-                progress?.reportStatus("Transcribing with Qwen3-ASR \(size.label)… \(min(99, pct))%")
+            // Progress: percent of audio seconds processed, reported only
+            // when the whole percent changes. This used to fire on every
+            // 512-sample chunk — 32 ms of audio — and each report becomes a
+            // main-actor hop and a SwiftUI update: ~225 000 of them for a
+            // two-hour file, against the ~100 anyone can see.
+            if duration > 0,
+               let pct = throttle.percent(for: Double(processor.currentTime) / duration) {
+                let shown = min(99, pct)
+                progress?.reportProgress(shown)
+                progress?.reportStatus("Transcribing with Qwen3-ASR \(size.label)… \(shown)%")
             }
 
             offset = end

@@ -140,6 +140,15 @@ let package = Package(
                 .product(name: "SpeechVAD", package: "speech-swift"),
             ],
             path: "Tests/UnitTests/Infrastructure"
+        // App-layer view models and services. Testing an executable target
+        // works because SwiftPM renames its entry point for test builds.
+        .testTarget(
+            name: "AppTests",
+            dependencies: [
+                "App", "Domain", "Infrastructure",
+            ],
+            path: "Tests/UnitTests/App"
+        ),
         ),
         .testTarget(
             name: "IntegrationTests",

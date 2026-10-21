@@ -7,7 +7,8 @@ public protocol VideoComposing: Sendable {
     /// - Parameter style: How the subtitles look (font size, colour,
     ///   position, etc.). Presets are resolved against the input video's
     ///   pixel height inside the implementation; `.custom` passes through.
-    /// - Parameter progress: Optional reporter for composition progress (0–100).
+    /// - Parameter progress: Optional reporter for composition progress, 0–100
+    ///   for this stage alone; the pipeline maps it onto the overall bar.
     /// - Throws: `ScribeError.ffmpegFailed` or `.compositionTimeout` on failure.
     func compose(
         video: URL,

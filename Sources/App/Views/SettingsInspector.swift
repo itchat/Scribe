@@ -6,9 +6,12 @@ import Infrastructure
 /// (Xcode Attributes Inspector, Keynote Format panel, Finder Info).
 struct SettingsInspector: View {
     @State private var vm: SettingsViewModel
-    var onSave: (AppConfig) -> Void
+    /// Receives a change to apply to the *current* config. Passing a change
+    /// rather than a finished `AppConfig` keeps fields this inspector doesn't
+    /// edit (the Live Captions engine, retry tuning) out of its hands.
+    var onSave: ((inout AppConfig) -> Void) -> Void
 
-    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
+    init(config: AppConfig, onSave: @escaping ((inout AppConfig) -> Void) -> Void) {
         self._vm = State(initialValue: SettingsViewModel(config: config))
         self.onSave = onSave
     }
@@ -34,7 +37,8 @@ struct SettingsInspector: View {
     /// `.onChange` (not `.onSubmit`) so changes persist as soon as the user
     /// moves focus away — not only on Enter.
     private func autoSave() {
-        onSave(vm.toConfig())
+        let vm = self.vm
+        onSave { vm.apply(to: &$0) }
     }
 
     // MARK: - Translation

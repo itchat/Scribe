@@ -55,6 +55,11 @@ public final class VideoPipeline: @unchecked Sendable {
         let audioURL = cacheDir.appendingPathComponent("\(baseName)\(Constants.audioFileSuffix)")
         let srtURL = videoDir.appendingPathComponent("\(baseName)\(Constants.englishSubtitleSuffix)")
 
+        // The extracted WAV is an intermediate — nothing reads it after
+        // recognition. It used to stay in the cache directory forever,
+        // hundreds of MB per long video, on every path out of this method.
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+
         do {
             // 1. Extract audio (0–10%)
             progress?.reportStatus("Extracting audio...")
@@ -64,7 +69,11 @@ public final class VideoPipeline: @unchecked Sendable {
 
             // 2. Speech recognition (10–70%)
             progress?.reportStatus("Recognizing speech...")
-            let transcription = try await speechRecognizer.transcribe(audioAt: audioURL, progress: progress)
+            let recognitionProgress = StageProgressReporter(
+                base: progress,
+                range: Constants.progressAudioExtractionEnd ... Constants.progressRecognitionEnd
+            )
+            let transcription = try await speechRecognizer.transcribe(audioAt: audioURL, progress: recognitionProgress)
             progress?.reportProgress(Constants.progressRecognitionEnd)
 
             // Format transcription into subtitle entries
@@ -117,6 +126,7 @@ public final class VideoPipeline: @unchecked Sendable {
             }
 
             progress?.reportStatus("Synthesizing video...")
+            progress?.reportProgress(Constants.progressVideoSynthesisStart)
             let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
             let ext = videoURL.pathExtension
             let outputURL = videoDir.appendingPathComponent("\(baseName)\(Constants.outputVideoSuffix)_\(timestamp).\(ext)")
@@ -126,7 +136,10 @@ public final class VideoPipeline: @unchecked Sendable {
                 subtitles: subtitlesToBurn,
                 output: outputURL,
                 style: options.subtitleStyle,
-                progress: progress
+                progress: StageProgressReporter(
+                    base: progress,
+                    range: Constants.progressVideoSynthesisStart ... Constants.progressVideoSynthesisEnd
+                )
             )
 
             progress?.reportStatus("Processing completed!")

@@ -270,4 +270,131 @@ struct VideoPipelineTests {
         let result = await pipeline.process()
         #expect(!result.isSuccess)
     }
+
+    // MARK: - Progress shape
+
+    @Test("Progress never moves backwards and ends at 100")
+    func progressIsMonotonic() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let videoURL = try makeFakeVideo(in: dir)
+        let progress = SpyProgressReporter()
+
+        // Stages report their own 0–100, as the real composer does. Before
+        // stage mapping, its raw 0 landed after the pipeline's 80.
+        let pipeline = VideoPipeline(
+            videoURL: videoURL,
+            cacheDir: dir,
+            options: ProcessingOptions(),
+            audioExtractor: FakeAudioExtractor(),
+            speechRecognizer: FakeSpeechRecognizer(),
+            translator: FakeTranslator(),
+            videoComposer: StageReportingComposer(),
+            subtitleFormatter: SubtitleFormatter(),
+            progress: progress
+        )
+
+        let result = await pipeline.process()
+
+        #expect(result.isSuccess)
+        #expect(progress.progressValues == progress.progressValues.sorted(),
+                "progress went backwards: \(progress.progressValues)")
+        #expect(progress.progressValues.last == 100)
+    }
+
+    @Test("Recognizer progress is mapped into the recognition slice")
+    func recognizerProgressIsMapped() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let videoURL = try makeFakeVideo(in: dir)
+        let progress = SpyProgressReporter()
+
+        let pipeline = VideoPipeline(
+            videoURL: videoURL,
+            cacheDir: dir,
+            options: ProcessingOptions(skipSubtitleBurning: true),
+            audioExtractor: FakeAudioExtractor(),
+            speechRecognizer: FakeSpeechRecognizer(),   // reports 50
+            translator: FakeTranslator(),
+            videoComposer: FakeVideoComposer(),
+            subtitleFormatter: SubtitleFormatter(),
+            progress: progress
+        )
+
+        _ = await pipeline.process()
+
+        // Halfway through recognition is halfway between 10 and 70.
+        #expect(progress.progressValues.contains(40))
+        #expect(!progress.progressValues.contains(50))
+    }
+
+    // MARK: - Intermediate audio cleanup
+
+    @Test("The extracted WAV is removed after a successful run")
+    func removesAudioAfterSuccess() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cacheDir = dir.appendingPathComponent("cache")
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        let videoURL = try makeFakeVideo(in: dir)
+
+        let pipeline = VideoPipeline(
+            videoURL: videoURL,
+            cacheDir: cacheDir,
+            options: ProcessingOptions(),
+            audioExtractor: FakeAudioExtractor(),
+            speechRecognizer: FakeSpeechRecognizer(),
+            translator: FakeTranslator(),
+            videoComposer: FakeVideoComposer(),
+            subtitleFormatter: SubtitleFormatter(),
+            progress: nil
+        )
+
+        let result = await pipeline.process()
+
+        #expect(result.isSuccess)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: cacheDir.path).isEmpty)
+    }
+
+    @Test("The extracted WAV is removed when a later stage fails")
+    func removesAudioAfterFailure() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cacheDir = dir.appendingPathComponent("cache")
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        let videoURL = try makeFakeVideo(in: dir)
+
+        let pipeline = VideoPipeline(
+            videoURL: videoURL,
+            cacheDir: cacheDir,
+            options: ProcessingOptions(),
+            audioExtractor: FakeAudioExtractor(),
+            speechRecognizer: ThrowingSpeechRecognizer(),
+            translator: FakeTranslator(),
+            videoComposer: FakeVideoComposer(),
+            subtitleFormatter: SubtitleFormatter(),
+            progress: nil
+        )
+
+        let result = await pipeline.process()
+
+        #expect(!result.isSuccess)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: cacheDir.path).isEmpty)
+    }
+}
+
+/// Composer that reports its own 0 → 100, like `FFmpegVideoComposer`.
+private final class StageReportingComposer: VideoComposing, @unchecked Sendable {
+    func compose(video: URL, subtitles: URL, output: URL, style: SubtitleStyle, progress: (any Protocols.ProgressReporting)?) async throws {
+        for p in [0, 25, 50, 99] { progress?.reportProgress(p) }
+        try Data(repeating: 0, count: 100).write(to: output)
+        progress?.reportProgress(100)
+    }
+}
+
+/// Recognizer that fails after extraction has written the WAV.
+private struct ThrowingSpeechRecognizer: SpeechRecognizing {
+    func transcribe(audioAt url: URL, progress: (any Protocols.ProgressReporting)?) async throws -> TranscriptionResult {
+        throw ScribeError.transcriptionFailed(underlying: NSError(domain: "test", code: 1))
+    }
 }

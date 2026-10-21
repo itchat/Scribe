@@ -65,13 +65,28 @@ struct Qwen3OfflineRecognizerE2ETests {
     /// the **entire** test run down with it, which is exactly what happened
     /// on a machine where `longVideo` existed: CI stayed green (file absent
     /// → test skipped) while the developer's own `swift test` aborted.
+    ///
+    /// The candidates mirror MLX's own search in `load_default_library`
+    /// (mlx/backend/metal/device.cpp). "Colocated" there means next to the
+    /// binary that contains MLX — under `swift test` that is this test
+    /// bundle's executable, not `Bundle.main`, which is the toolchain's test
+    /// runner inside Xcode.app. Checking `Bundle.main` meant this gate could
+    /// never pass under `swift test`, so these tests were always skipped.
     private static var mlxMetallibAvailable: Bool {
-        guard let execDir = Bundle.main.executableURL?.deletingLastPathComponent() else {
-            return false
+        let testBundle = Bundle(for: BundleToken.self)
+        var candidates: [URL] = []
+        if let binDir = testBundle.executableURL?.deletingLastPathComponent() {
+            candidates.append(binDir.appendingPathComponent("mlx.metallib"))
+            candidates.append(binDir.appendingPathComponent("Resources/mlx.metallib"))
         }
-        return FileManager.default.fileExists(
-            atPath: execDir.appendingPathComponent("mlx.metallib").path
+        // SwiftPM compiles mlx-swift's shaders into its resource bundle
+        // when the Metal toolchain is installed; the bundle sits beside the
+        // test bundle in the build products directory.
+        candidates.append(
+            testBundle.bundleURL.deletingLastPathComponent()
+                .appendingPathComponent("mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib")
         )
+        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     /// Every Qwen3 case needs both a video *and* a usable MLX runtime.
@@ -148,3 +163,6 @@ private final class PrintProgress: Protocols.ProgressReporting, @unchecked Senda
         print("[status] \(message)")
     }
 }
+
+/// Anchor for `Bundle(for:)`, which needs a class defined in this test bundle.
+private final class BundleToken {}

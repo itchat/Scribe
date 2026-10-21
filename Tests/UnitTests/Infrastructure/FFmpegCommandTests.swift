@@ -23,6 +23,52 @@ struct FFmpegLocatorTests {
         #expect(!exists)
     }
 
+    // MARK: - Hardware-acceleration probe
+
+    /// Writes an executable stand-in for ffmpeg that records each launch.
+    private func makeCountingFFmpeg(printing output: String) throws -> (binary: URL, launches: URL, dir: URL) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fake-ffmpeg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let launches = dir.appendingPathComponent("launches")
+        let binary = dir.appendingPathComponent("ffmpeg")
+        try """
+        #!/bin/sh
+        echo x >> "\(launches.path)"
+        echo "\(output)"
+        """.write(to: binary, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        return (binary, launches, dir)
+    }
+
+    private func launchCount(_ file: URL) -> Int {
+        ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n").count
+    }
+
+    @Test("The hardware-acceleration probe launches ffmpeg once per binary")
+    func hardwareProbeIsCached() throws {
+        // Every queued video builds an extractor and a composer, and each
+        // used to launch `ffmpeg -version` on the main actor.
+        let fake = try makeCountingFFmpeg(printing: "configuration: --enable-videotoolbox")
+        defer { try? FileManager.default.removeItem(at: fake.dir) }
+
+        for _ in 0 ..< 5 {
+            #expect(FFmpegLocator.checkHardwareAcceleration(ffmpegPath: fake.binary.path))
+        }
+
+        #expect(launchCount(fake.launches) == 1)
+    }
+
+    @Test("A negative probe result is cached too")
+    func negativeProbeIsCached() throws {
+        let fake = try makeCountingFFmpeg(printing: "configuration: --disable-everything")
+        defer { try? FileManager.default.removeItem(at: fake.dir) }
+
+        #expect(!FFmpegLocator.checkHardwareAcceleration(ffmpegPath: fake.binary.path))
+        #expect(!FFmpegLocator.checkHardwareAcceleration(ffmpegPath: fake.binary.path))
+
+        #expect(launchCount(fake.launches) == 1)
+    }
+
     // MARK: - ffprobe derivation
 
     /// Regression: the old implementation used
